@@ -100,7 +100,7 @@ const I18N={
     bet:'BET',raise:'RAISE',allinB:'ALL IN',toCall:'To call',stack:'Stack',
     betLbl:'BET',raiseLbl:'RAISE',showdown:'SHOWDOWN',inPot:'in pot',
     nextStreet:'NEXT STREET',nextHand:'NEXT HAND ▶',wins:'🏆 WINS',undo:'↩ UNDO',
-    rounds:['Pre-flop','Flop','Turn','River','Extra'],
+    rounds:['Pre-flop','Flop','Turn','River','Showdown'],
     tabGame:'♠ TABLE',tabHands:'📖 HANDS',
     local:'LOCAL',host:'HOST',join:'JOIN',yourCode:'SHARE THIS CODE',
     connected:'connected',startGame:'START GAME ▶',waitPlayers:'Waiting for players...',
@@ -117,7 +117,7 @@ const I18N={
     bet:'MISER',raise:'RELANCER',allinB:'TAPIS',toCall:'À suivre',stack:'Stack',
     betLbl:'MISE',raiseLbl:'RELANCE',showdown:'SHOWDOWN',inPot:'dans le pot',
     nextStreet:'PROCHAINE MISE',nextHand:'MAIN SUIVANTE ▶',wins:'🏆 GAGNE',undo:'↩ ANNULER',
-    rounds:['Pré-flop','Flop','Turn','Rivière','Extra'],
+    rounds:['Pré-flop','Flop','Turn','Rivière','Showdown'],
     tabGame:'♠ TABLE',tabHands:'📖 MAINS',
     local:'LOCAL',host:'CRÉER',join:'REJOINDRE',yourCode:'PARTAGEZ CE CODE',
     connected:'connecté(s)',startGame:'LANCER ▶',waitPlayers:'En attente de joueurs...',
@@ -146,7 +146,7 @@ const I18N={
     bet:'APOSTAR',raise:'SUBIR',allinB:'TODO IN',toCall:'A igualar',stack:'Fichas',
     betLbl:'APUESTA',raiseLbl:'SUBIDA',showdown:'SHOWDOWN',inPot:'en el bote',
     nextStreet:'SIGUIENTE CALLE',nextHand:'SIGUIENTE MANO ▶',wins:'🏆 GANA',undo:'↩ DESHACER',
-    rounds:['Pre-flop','Flop','Turn','Río','Extra'],
+    rounds:['Pre-flop','Flop','Turn','Río','Showdown'],
     tabGame:'♠ MESA',tabHands:'📖 MANOS',
     local:'LOCAL',host:'CREAR',join:'UNIRSE',yourCode:'COMPARTE ESTE CÓDIGO',
     connected:'conectado(s)',startGame:'INICIAR ▶',waitPlayers:'Esperando jugadores...',
@@ -163,7 +163,7 @@ const I18N={
     bet:'SETZEN',raise:'ERHÖHEN',allinB:'ALLES REIN',toCall:'Zu zahlen',stack:'Stack',
     betLbl:'EINSATZ',raiseLbl:'ERHÖHUNG',showdown:'SHOWDOWN',inPot:'im Pot',
     nextStreet:'NÄCHSTE RUNDE',nextHand:'NÄCHSTE HAND ▶',wins:'🏆 GEWINNT',undo:'↩ RÜCKGÄNGIG',
-    rounds:['Pre-Flop','Flop','Turn','River','Extra'],
+    rounds:['Pre-Flop','Flop','Turn','River','Showdown'],
     tabGame:'♠ TISCH',tabHands:'📖 HÄNDE',
     local:'LOKAL',host:'ERSTELLEN',join:'BEITRETEN',yourCode:'DIESEN CODE TEILEN',
     connected:'verbunden',startGame:'STARTEN ▶',waitPlayers:'Warte auf Spieler...',
@@ -295,12 +295,33 @@ function collectBets(gs){
   const total=Object.values(gs.rBets).reduce((s,v)=>s+v,0);
   const newPot=gs.pot+total;
   const alive=gs.players.filter(p=>!p.folded);
-  // If only 1 active player left after collecting, skip showdown → direct win
+
+  // Un seul joueur actif (tous les autres ont foldé)
   if(alive.length===1){
     const winner=alive[0];
     const newPs=gs.players.map(p=>p.id===winner.id?{...p,stack:p.stack+newPot}:p);
-    return{...gs,players:newPs,pot:0,rBets:{},bQueue:[],phase:'gameover'};
+    // Vérifier si le tournoi est terminé (les autres sont-ils à 0 ?)
+    const stillAlive=newPs.filter(p=>p.stack>0);
+    if(stillAlive.length<=1){
+      return{...gs,players:newPs,pot:0,rBets:{},bQueue:[],phase:'gameover'};
+    }
+    // Sinon : victoire de main, pas fin de tournoi
+    return{...gs,players:newPs,pot:0,rBets:{},bQueue:[],phase:'foldwin'};
   }
+
+  // Plusieurs joueurs : avancer automatiquement aux rues suivantes
+  const rn=gs.roundNum||0;
+  if(rn<3){
+    // Auto-advance : Preflop→Flop→Turn→River
+    const newQ=[];
+    for(let i=1;i<=gs.players.length;i++){
+      const idx=(gs.dIdx+i)%gs.players.length;
+      if(!gs.players[idx].folded&&gs.players[idx].stack>0)newQ.push(gs.players[idx].id);
+    }
+    const BB=getBlind(gs.startBlind,gs.blindLvl||0);
+    return{...gs,pot:newPot,rBets:{},bQueue:newQ,curBet:0,lastRaise:BB,phase:'betting',roundNum:rn+1};
+  }
+  // Après la river (round 3) → showdown
   return{...gs,pot:newPot,rBets:{},bQueue:[],phase:'showdown'};
 }
 function applyFold(gs,id){
@@ -579,8 +600,9 @@ function App(){
     }catch{}
   }
   function publishState(newGs){
-    if(chanRef.current&&isHost)
+    if(chanRef.current&&isHost){
       chanRef.current.publish('state',{gs:newGs,timer});
+    }
   }
   function doNotif(msg){setNotif(msg);setTimeout(()=>setNotif(''),2400);}
 
@@ -630,13 +652,14 @@ function App(){
         ch.subscribe('action',(msg)=>{
           const{pid,type,amount}=msg.data;
           setGs(prev=>{
-            if(!prev||prev.bQueue[0]!==pid)return prev;
+            if(!prev||prev.bQueue[0]!==pid)return prev; // sécurité : vérif que c'est bien son tour
             let next;
             if(type==='fold')next=applyFold(prev,pid);
             else if(type==='call')next=applyCall(prev,pid);
             else if(type==='raise')next=applyRaise(prev,pid,amount);
             else return prev;
-            ch.publish('state',{gs:next,timer});
+            // Broadcaster le nouvel état à tous les joueurs
+            ch.publish('state',{gs:next,timer:0});
             return next;
           });
         });
@@ -644,7 +667,12 @@ function App(){
           setLobbyPlayers(prev=>[...prev.filter(p=>p.id!==msg.data.id),msg.data]);
         });
       }else{
-        ch.subscribe('state',(msg)=>{setGs(msg.data.gs);setTimer(msg.data.timer||0);});
+        ch.subscribe('state',(msg)=>{
+          if(msg.data.gs){
+            setGs(msg.data.gs);
+            if(msg.data.timer)setTimer(msg.data.timer);
+          }
+        });
         ch.subscribe('start',(msg)=>{setGs(msg.data.gs);setTimer(msg.data.blindMins*60);setScreen('online-game');});
         ch.publish('join',{id:myId.current,name:nameInput||'Player'});
       }
@@ -660,19 +688,47 @@ function App(){
     saveLocal(next,timer,screen);
     return next;
   }
-  function handleFold(){
-    const next=act(applyFold,gs.bQueue[0]);
-    // If gameover (auto-win via collectBets), show winner notif
-    if(next.phase==='gameover'){
-      const winner=next.players.find(p=>!p.folded);
-      if(winner)doNotif(L.nWinsG(winner.name));
-    } else {
-      const alive=next.players.filter(p=>!p.folded);
-      if(alive.length===1)doNotif(L.nWinsH(alive[0].name));
+  // En mode online, les guests envoient une action au host via Ably
+  // Le host traite et broadcast le nouvel état à tous
+  function sendAction(type, amount){
+    if(screen==='online-game' && !isHost && chanRef.current){
+      chanRef.current.publish('action',{pid:myId.current, type, amount});
     }
   }
-  function handleCall(){act(applyCall,gs.bQueue[0]);}
-  function handleRaise(amt){act(applyRaise,gs.bQueue[0],amt);}
+  function isGuest(){ return screen==='online-game' && !isHost; }
+
+  function checkHandEnd(next){
+    if(next.phase==='foldwin'||next.phase==='gameover'){
+      const winner=next.players.find(p=>p.stack>0&&!next.players.every(p2=>p2.id===p.id||p2.folded));
+      const w=next.players.reduce((best,p)=>p.stack>=(best?.stack||0)?p:best, null);
+      if(next.phase==='gameover'){
+        const pid=screen==='online-game'?w?.id:null;
+        recordGame(pid);
+        const ms=getMilestone(pid);
+        const didx=getDonIdx(pid);
+        const isWinner=screen==='local-game'||(w?.id===myId.current);
+        if(isWinner){ setDonWinner(w?.name||''); if(ms>0)setMilestoneN(ms); else if(didx>=0)setDonIdx(didx); }
+        doNotif(L.nWinsG(w?.name||'?'));
+      } else {
+        // foldwin : juste notifier
+        const fw=next.players.filter(p=>!p.folded&&p.stack>0);
+        if(fw.length===1) doNotif(L.nWinsH(fw[0].name));
+      }
+    }
+  }
+  function handleFold(){
+    if(isGuest()){ sendAction('fold'); return; }
+    const next=act(applyFold,gs.bQueue[0]);
+    checkHandEnd(next);
+  }
+  function handleCall(){
+    if(isGuest()){ sendAction('call'); return; }
+    act(applyCall,gs.bQueue[0]);
+  }
+  function handleRaise(amt){
+    if(isGuest()){ sendAction('raise', amt); return; }
+    act(applyRaise,gs.bQueue[0],amt);
+  }
   function handleWin(pid){
     const winner=gs.players.find(p=>p.id===pid);
     const next=act(applyWin,pid);
@@ -684,18 +740,7 @@ function App(){
     const eliminated=gs.players.filter(p=>p.stack===0).map(p=>p.name);
     const next=act(applyNextHand);
     if(next.phase==='gameover'){
-      const winner=alive[0];
-      const pid=screen==='online-game'?winner?.id:null; // null=device counter for local
-      recordGame(pid);
-      const ms=getMilestone(pid);
-      const didx=getDonIdx(pid);
-      const isWinner=screen==='local-game'||winner?.id===myId.current;
-      if(isWinner){
-        setDonWinner(winner?.name||'');
-        if(ms>0)setMilestoneN(ms);
-        else if(didx>=0)setDonIdx(didx);
-      }
-      doNotif(L.nWinsG(winner?.name||'?'));
+      checkHandEnd(next);
       return;
     }
     if(eliminated.length)setTimeout(()=>doNotif(L.nElim(eliminated.join(', '))),80);
@@ -759,6 +804,7 @@ function App(){
   function launchOnlineGame(){
     const allP=lobbyPlayers.slice(0,numP);
     if(allP.length<2)return;
+    // S'assurer que chaque joueur a son UUID comme id (important pour isMyTurn)
     const ps=allP.map((lp,i)=>({id:lp.id,name:lp.name,stack:startChips,color:SEAT_COLORS[i%SEAT_COLORS.length],folded:false}));
     const initGs=makeInitGs(ps,startBlind,startChips);
     setGs(initGs);setTimer(blindMins*60);
@@ -798,7 +844,14 @@ function App(){
   const roundBets=gs?Object.values(gs.rBets||{}).reduce((s,v)=>s+v,0):0;
   const timerCrit=timer<60;
   const roundLabel=gs?L.rounds[Math.min(gs.roundNum,L.rounds.length-1)]:'';
-  const isMyTurn=gs&&curActor&&(screen==='local-game'||(screen==='online-game'&&curActor.id===myId.current));
+  // Local : toujours afficher le panel (tour par tour sur un seul écran)
+  // Online host : toujours voir et jouer (il gère tout)
+  // Online guest : seulement quand c'est son tour (son UUID)
+  const isMyTurn=gs&&curActor&&(
+    screen==='local-game' ||
+    (screen==='online-game' && isHost) ||
+    (screen==='online-game' && !isHost && curActor.id===myId.current)
+  );
 
   // ── Shared styles ──
   const card={background:T.panel,border:'1px solid rgba(255,255,255,.07)',borderRadius:'14px',padding:'18px 16px',marginBottom:'10px'};
@@ -1164,56 +1217,70 @@ function App(){
 
           {/* BETTING PANEL */}
           {gs.phase==='betting'&&curActor&&(isMyTurn||screen==='local-game')&&(
-            <div style={{background:T.panel,borderTop:'1px solid rgba(255,255,255,.07)',padding:'8px 12px 10px',flexShrink:0,animation:'slideUp .2s ease'}}>
-              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'6px'}}>
+            <div style={{background:T.panel,borderTop:'1px solid rgba(255,255,255,.07)',padding:'6px 10px 8px',flexShrink:0,animation:'slideUp .2s ease'}}>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'4px'}}>
                 <div style={{display:'flex',alignItems:'center',gap:'8px'}}>
                   <div style={{width:'14px',height:'14px',borderRadius:'50%',background:curActor.color}}/>
-                  <span style={{fontSize:'20px',fontWeight:700,letterSpacing:'1px',textTransform:'uppercase'}}>{curActor.name}</span>
-                  <span style={{fontSize:'16px',color:T.dim}}>{L.stack}&nbsp;<span style={{color:T.cream,fontFamily:'monospace'}}>{fmt(curActor.stack)}</span></span>
+                  <span style={{fontSize:'16px',fontWeight:700,letterSpacing:'1px',textTransform:'uppercase'}}>{curActor.name}</span>
+                  <span style={{fontSize:'16px',color:T.dim}}>{L.stack}&nbsp;<span style={{color:T.cream,fontFamily:'monospace',fontSize:'14px'}}>{fmt(curActor.stack)}</span></span>
                 </div>
                 {owed>0&&<span style={{fontSize:'16px',color:T.dim}}>{L.toCall}&nbsp;<span style={{color:T.cream,fontFamily:'monospace',fontWeight:700}}>{fmt(owed)}</span></span>}
               </div>
 
               {/* Bet amount selector */}
               <div style={{marginBottom:'14px'}}>
-                {/* Amount display */}
-                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'10px'}}>
-                  <span style={{fontSize:'14px',letterSpacing:'2px',color:T.dim}}>{gs.curBet===0?L.betLbl:L.raiseLbl}</span>
-                  <span style={{fontSize:'24px',fontWeight:800,color:raiseAmtIsAllIn?T.red:T.gold,fontFamily:'monospace',letterSpacing:'1px'}}>
-                    {raiseAmtIsAllIn?L.allinB:fmt(raiseAmt)}
-                  </span>
+                {/* Winamax compact raise row */}
+                <div style={{display:'flex',alignItems:'center',gap:'6px',marginBottom:'5px'}}>
+                  <span style={{fontSize:'11px',letterSpacing:'2px',color:T.dim,flexShrink:0}}>{gs.curBet===0?L.betLbl:L.raiseLbl}</span>
+                  <span style={{flex:1,fontFamily:'monospace',fontSize:'20px',fontWeight:800,color:raiseAmtIsAllIn?T.red:T.gold,textAlign:'center'}}>{raiseAmtIsAllIn?L.allinB:fmt(raiseAmt)}</span>
+                  <button onClick={()=>setRaiseAmt(a=>Math.max(minRaiseAmt,a-BB_now))} style={{padding:'4px 9px',background:'rgba(255,255,255,.07)',border:'1px solid rgba(255,255,255,.14)',borderRadius:'7px',color:T.text,fontFamily:'inherit',fontSize:'15px',fontWeight:700,cursor:'pointer'}}>−BB</button>
+                  <button onClick={()=>setRaiseAmt(a=>Math.min(actorAllIn,a+BB_now))} style={{padding:'4px 9px',background:'rgba(255,255,255,.07)',border:'1px solid rgba(255,255,255,.14)',borderRadius:'7px',color:T.text,fontFamily:'inherit',fontSize:'15px',fontWeight:700,cursor:'pointer'}}>+BB</button>
+                  <button onClick={()=>setRaiseAmt(actorAllIn)} style={{padding:'4px 9px',background:raiseAmtIsAllIn?'rgba(229,57,53,.2)':'rgba(255,255,255,.07)',border:`1px solid ${raiseAmtIsAllIn?T.red:'rgba(255,255,255,.14)'}`,borderRadius:'7px',color:raiseAmtIsAllIn?T.red:T.dim,fontFamily:'inherit',fontSize:'11px',fontWeight:800,cursor:'pointer',letterSpacing:'1px'}}>ALL IN</button>
                 </div>
-                {/* BB- | BB+ | ALL IN */}
-                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1.4fr',gap:'8px'}}>
-                  <button onClick={()=>setRaiseAmt(a=>Math.max(minRaiseAmt,a-BB_now))}
-                    style={{padding:'10px 4px',background:'rgba(255,255,255,.06)',border:'1px solid rgba(255,255,255,.14)',borderRadius:'10px',color:T.text,fontFamily:'inherit',fontSize:'18px',fontWeight:700,cursor:'pointer',letterSpacing:'0'}}>−BB</button>
-                  <button onClick={()=>setRaiseAmt(a=>Math.min(actorAllIn,a+BB_now))}
-                    style={{padding:'10px 4px',background:'rgba(255,255,255,.06)',border:'1px solid rgba(255,255,255,.14)',borderRadius:'10px',color:T.text,fontFamily:'inherit',fontSize:'18px',fontWeight:700,cursor:'pointer',letterSpacing:'0'}}>+BB</button>
-                  <button onClick={()=>setRaiseAmt(actorAllIn)}
-                    style={{padding:'13px 4px',background:raiseAmtIsAllIn?'rgba(229,57,53,.2)':'rgba(255,255,255,.06)',border:`1px solid ${raiseAmtIsAllIn?T.red:'rgba(255,255,255,.18)'}`,borderRadius:'10px',color:raiseAmtIsAllIn?T.red:T.text,fontFamily:'inherit',fontSize:'16px',fontWeight:800,cursor:'pointer',letterSpacing:'1px'}}>ALL IN</button>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'6px'}}>
+                  <button className="btn-r" onClick={handleFold} style={{padding:'10px 4px',fontSize:'15px'}}>{L.fold}</button>
+                  <button className="btn-b" onClick={handleCall} style={{padding:'10px 4px',fontSize:'15px'}}>
+                    {isCheck?L.check:<>{owed<=curActor.stack?L.call:L.allinC}<br/><span style={{fontSize:'12px',fontFamily:'monospace'}}>{fmt(Math.min(owed,curActor.stack))}</span></>}
+                  </button>
+                  <button className="btn-g" onClick={()=>handleRaise(raiseAmt)} style={{padding:'10px 4px',fontSize:'15px'}}>
+                    {isAllIn?L.allinB:gs.curBet===0?<>{L.bet}<br/><span style={{fontSize:'12px',fontFamily:'monospace'}}>{fmt(raiseAmt)}</span></>:<>{L.raise}<br/><span style={{fontSize:'12px',fontFamily:'monospace'}}>{fmt(raiseAmt)}</span></>}
+                  </button>
+                  {hasUndo&&<button className="btn-undo" onClick={doUndo}>{L.undo}</button>}
                 </div>
-              </div>
-
-              {/* Buttons */}
-              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px'}}>
-                <button className="btn-r" onClick={handleFold}>{L.fold}</button>
-                <button className="btn-b" onClick={handleCall}>
-                  {isCheck?L.check:<>{owed<=curActor.stack?L.call:L.allinC}<br/><span style={{fontSize:'14px',fontFamily:'monospace'}}>{fmt(Math.min(owed,curActor.stack))}</span></>}
-                </button>
-                <button className="btn-g" onClick={()=>handleRaise(raiseAmt)}>
-                  {isAllIn?L.allinB:gs.curBet===0?<>{L.bet}<br/><span style={{fontSize:'14px',fontFamily:'monospace'}}>{fmt(raiseAmt)}</span></>:<>{L.raise}<br/><span style={{fontSize:'14px',fontFamily:'monospace'}}>{fmt(raiseAmt)}</span></>}
-                </button>
-                {hasUndo&&<button className="btn-undo" onClick={doUndo}>{L.undo}</button>}
               </div>
             </div>
           )}
 
           {/* WAITING */}
           {gs.phase==='betting'&&curActor&&screen==='online-game'&&!isMyTurn&&(
-            <div style={{background:T.panel,borderTop:'1px solid rgba(255,255,255,.07)',padding:'20px 14px',flexShrink:0,textAlign:'center'}}>
-              <div style={{fontSize:'18px',color:T.dim,letterSpacing:'2px',animation:'pulse 1.5s ease infinite'}}>⏳&nbsp;{curActor.name}...</div>
+            <div style={{background:T.panel,borderTop:'1px solid rgba(255,255,255,.07)',padding:'16px 14px',flexShrink:0,textAlign:'center'}}>
+              <div style={{fontSize:'18px',color:T.dim,letterSpacing:'2px',animation:'pulse 1.5s ease infinite'}}>
+                ⏳&nbsp;<span style={{color:T.cream,textTransform:'uppercase'}}>{curActor.name}</span>&nbsp;joue...
+              </div>
+              <div style={{fontSize:'13px',color:T.dim,marginTop:'4px',fontFamily:'monospace'}}>
+                Stack : {fmt(curActor.stack)}
+              </div>
             </div>
           )}
+
+          {/* FOLD WIN — victoire de main */}
+          {gs.phase==='foldwin'&&(()=>{
+            const fw=gs.players.filter(p=>!p.folded&&p.stack>0);
+            const winner=fw[0];
+            return(
+            <div style={{background:T.panel,borderTop:'1px solid rgba(255,255,255,.07)',padding:'12px 14px 14px',flexShrink:0,animation:'slideUp .2s ease'}}>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'10px'}}>
+                {winner&&<div style={{display:'flex',alignItems:'center',gap:'8px'}}>
+                  <div style={{width:'10px',height:'10px',borderRadius:'50%',background:winner.color}}/>
+                  <span style={{fontSize:'18px',fontWeight:700,color:T.gold,textTransform:'uppercase'}}>{winner.name}</span>
+                  <span style={{fontSize:'13px',color:T.dim}}>{L.wins}</span>
+                </div>}
+                <span style={{fontFamily:'monospace',fontSize:'16px',color:T.gold}}>{fmt(winner?.stack||0)}</span>
+              </div>
+              <button onClick={handleNextHand} style={{width:'100%',padding:'13px',background:`rgba(212,175,55,.1)`,border:`1px solid ${T.gold}44`,borderRadius:'12px',color:T.gold,fontFamily:'inherit',fontSize:'16px',fontWeight:700,letterSpacing:'1px',cursor:'pointer'}}>{L.nextHand}</button>
+            </div>
+            );
+          })()}
 
           {/* GAME OVER */}
           {gs.phase==='gameover'&&(
@@ -1252,13 +1319,8 @@ function App(){
                   </button>
                 ))}
               </div>
-              <div style={{display:'grid',gridTemplateColumns:active.length>=2?'1fr 1fr':'1fr',gap:'8px'}}>
-                {active.length>=2&&(
-                  <button onClick={handleNextStreet} style={{padding:'14px 4px',background:'transparent',border:'1px solid rgba(255,255,255,.16)',borderRadius:'12px',color:T.text,fontFamily:'inherit',fontSize:'16px',fontWeight:600,letterSpacing:'1px',cursor:'pointer'}}>{L.nextStreet}</button>
-                )}
-                <button onClick={handleNextHand} style={{padding:'14px 4px',background:`rgba(212,175,55,.1)`,border:`1px solid ${T.gold}44`,borderRadius:'12px',color:T.gold,fontFamily:'inherit',fontSize:'16px',fontWeight:700,letterSpacing:'1px',cursor:'pointer'}}>{L.nextHand}</button>
-              </div>
-              {hasUndo&&<button className="btn-undo" style={{marginTop:'8px',width:'100%'}} onClick={doUndo}>{L.undo}</button>}
+              <button onClick={handleNextHand} style={{width:'100%',padding:'13px 4px',background:`rgba(212,175,55,.1)`,border:`1px solid ${T.gold}44`,borderRadius:'12px',color:T.gold,fontFamily:'inherit',fontSize:'16px',fontWeight:700,letterSpacing:'1px',cursor:'pointer'}}>{L.nextHand}</button>
+              {hasUndo&&<button className="btn-undo" style={{marginTop:'6px',width:'100%'}} onClick={doUndo}>{L.undo}</button>}
             </div>
           )}
     </div>
