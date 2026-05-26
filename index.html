@@ -22,7 +22,7 @@ const{useState,useEffect,useRef}=React;
 const ABLY_KEY  ='YOUR_ABLY_API_KEY';
 const SENTRY_DSN='YOUR_SENTRY_DSN';
 const DONATE_URL='YOUR_DONATION_URL';
-const APP_URL   =window.location.origin+window.location.pathname;
+const APP_URL = 'https://j00hnpoker.github.io/Poker-VC';
 
 if(SENTRY_DSN!=='YOUR_SENTRY_DSN'&&typeof Sentry!=='undefined')
   Sentry.init({dsn:SENTRY_DSN,tracesSampleRate:0.2});
