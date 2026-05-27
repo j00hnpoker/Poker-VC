@@ -559,6 +559,7 @@ function App(){
   const ablyRef=useRef(null);
   const chanRef=useRef(null);
   const myId=useRef(getMyId());
+  const joinIntervalRef=useRef(null);
 
   // ── Timer ──
   useEffect(()=>{
@@ -663,8 +664,17 @@ function App(){
             return next;
           });
         });
+        const seenJoins=new Set();
         ch.subscribe('join',(msg)=>{
-          setLobbyPlayers(prev=>[...prev.filter(p=>p.id!==msg.data.id),msg.data]);
+          setLobbyPlayers(prev=>{
+            const updated=[...prev.filter(p=>p.id!==msg.data.id),msg.data];
+            return updated;
+          });
+          // Confirmer au guest qu'on l'a reçu (stop retry)
+          if(!seenJoins.has(msg.data.id)){
+            seenJoins.add(msg.data.id);
+            ch.publish('lobby',{received:msg.data.id});
+          }
         });
       }else{
         ch.subscribe('state',(msg)=>{
@@ -673,8 +683,18 @@ function App(){
             if(msg.data.timer)setTimer(msg.data.timer);
           }
         });
-        ch.subscribe('start',(msg)=>{setGs(msg.data.gs);setTimer(msg.data.blindMins*60);setScreen('online-game');});
-        ch.publish('join',{id:myId.current,name:nameInput||'Player'});
+        ch.subscribe('lobby',(msg)=>{
+          // Host confirms receipt of join — stop retrying
+          if(joinIntervalRef.current){clearInterval(joinIntervalRef.current);joinIntervalRef.current=null;}
+        });
+        ch.subscribe('start',(msg)=>{
+          if(joinIntervalRef.current){clearInterval(joinIntervalRef.current);joinIntervalRef.current=null;}
+          setGs(msg.data.gs);setTimer(msg.data.blindMins*60);setScreen('online-game');
+        });
+        // Publier join toutes les 1.5s jusqu'à confirmation (fix race condition)
+        const joinPayload={id:myId.current,name:nameInput||'Player'};
+        ch.publish('join',joinPayload);
+        joinIntervalRef.current=setInterval(()=>ch.publish('join',joinPayload),1500);
       }
     }catch(e){captureErr(e);}
   }
@@ -697,23 +717,28 @@ function App(){
   }
   function isGuest(){ return screen==='online-game' && !isHost; }
 
+  // Appelé après chaque fin de main (foldwin, showdown win, gameover)
+  function triggerDonation(winnerPlayer){
+    const pid=screen==='online-game'?winnerPlayer?.id:null;
+    recordGame(pid);
+    const ms=getMilestone(pid);
+    const didx=getDonIdx(pid);
+    const isWinner=screen==='local-game'||(winnerPlayer?.id===myId.current);
+    if(isWinner){
+      setDonWinner(winnerPlayer?.name||'');
+      if(ms>0)setMilestoneN(ms);
+      else if(didx>=0)setDonIdx(didx);
+    }
+  }
   function checkHandEnd(next){
-    if(next.phase==='foldwin'||next.phase==='gameover'){
-      const winner=next.players.find(p=>p.stack>0&&!next.players.every(p2=>p2.id===p.id||p2.folded));
+    if(next.phase==='foldwin'){
+      const fw=next.players.filter(p=>!p.folded&&p.stack>0);
+      const winner=fw[0];
+      if(winner) doNotif(L.nWinsH(winner.name));
+    } else if(next.phase==='gameover'){
       const w=next.players.reduce((best,p)=>p.stack>=(best?.stack||0)?p:best, null);
-      if(next.phase==='gameover'){
-        const pid=screen==='online-game'?w?.id:null;
-        recordGame(pid);
-        const ms=getMilestone(pid);
-        const didx=getDonIdx(pid);
-        const isWinner=screen==='local-game'||(w?.id===myId.current);
-        if(isWinner){ setDonWinner(w?.name||''); if(ms>0)setMilestoneN(ms); else if(didx>=0)setDonIdx(didx); }
-        doNotif(L.nWinsG(w?.name||'?'));
-      } else {
-        // foldwin : juste notifier
-        const fw=next.players.filter(p=>!p.folded&&p.stack>0);
-        if(fw.length===1) doNotif(L.nWinsH(fw[0].name));
-      }
+      triggerDonation(w);
+      doNotif(L.nWinsG(w?.name||'?'));
     }
   }
   function handleFold(){
@@ -1277,7 +1302,9 @@ function App(){
                 </div>}
                 <span style={{fontFamily:'monospace',fontSize:'16px',color:T.gold}}>{fmt(winner?.stack||0)}</span>
               </div>
-              <button onClick={handleNextHand} style={{width:'100%',padding:'13px',background:`rgba(212,175,55,.1)`,border:`1px solid ${T.gold}44`,borderRadius:'12px',color:T.gold,fontFamily:'inherit',fontSize:'16px',fontWeight:700,letterSpacing:'1px',cursor:'pointer'}}>{L.nextHand}</button>
+              {(screen==='local-game'||isHost)&&(
+                <button onClick={handleNextHand} style={{width:'100%',padding:'13px',background:`rgba(212,175,55,.1)`,border:`1px solid ${T.gold}44`,borderRadius:'12px',color:T.gold,fontFamily:'inherit',fontSize:'16px',fontWeight:700,letterSpacing:'1px',cursor:'pointer'}}>{L.nextHand}</button>
+              )}
             </div>
             );
           })()}
@@ -1290,14 +1317,21 @@ function App(){
                 {gs.players.sort((a,b)=>b.stack-a.stack)[0]?.name}
               </div>
               <div style={{fontSize:'14px',color:T.dim,letterSpacing:'2px',marginBottom:'18px'}}>{L.nWinsG('').replace('!','').trim()}</div>
-              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
-                <button onClick={startRematch} style={{padding:'16px',background:`linear-gradient(135deg,${T.gold},#b08a20)`,border:'none',borderRadius:'12px',color:T.bg,fontFamily:'inherit',fontSize:'18px',fontWeight:800,letterSpacing:'2px',cursor:'pointer'}}>
-                  {L.rematch}
+              {/* Host : REVANCHE + NOUVELLE PARTIE | Guest : QUITTER */}
+              {(screen==='local-game'||isHost)?(
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
+                  <button onClick={startRematch} style={{padding:'16px',background:`linear-gradient(135deg,${T.gold},#b08a20)`,border:'none',borderRadius:'12px',color:T.bg,fontFamily:'inherit',fontSize:'18px',fontWeight:800,letterSpacing:'2px',cursor:'pointer'}}>
+                    {L.rematch}
+                  </button>
+                  <button onClick={()=>{localStorage.removeItem('vpc_screen');setGs(null);setScreen(screen==='online-game'?'landing':'local-setup');}} style={{padding:'16px',background:'rgba(255,255,255,.07)',border:'1px solid rgba(255,255,255,.18)',borderRadius:'12px',color:T.text,fontFamily:'inherit',fontSize:'16px',fontWeight:700,letterSpacing:'1px',cursor:'pointer'}}>
+                    {L.newGame}
+                  </button>
+                </div>
+              ):(
+                <button onClick={()=>{setGs(null);setScreen('landing');}} style={{width:'100%',padding:'16px',background:'rgba(255,255,255,.07)',border:'1px solid rgba(255,255,255,.18)',borderRadius:'12px',color:T.dim,fontFamily:'inherit',fontSize:'16px',fontWeight:700,letterSpacing:'1px',cursor:'pointer'}}>
+                  Quitter la partie
                 </button>
-                <button onClick={()=>{localStorage.removeItem('vpc_screen');setGs(null);setScreen('local-setup');}} style={{padding:'16px',background:'rgba(255,255,255,.07)',border:'1px solid rgba(255,255,255,.18)',borderRadius:'12px',color:T.text,fontFamily:'inherit',fontSize:'16px',fontWeight:700,letterSpacing:'1px',cursor:'pointer'}}>
-                  {L.newGame}
-                </button>
-              </div>
+              )}
             </div>
           )}
 
@@ -1319,7 +1353,9 @@ function App(){
                   </button>
                 ))}
               </div>
-              <button onClick={handleNextHand} style={{width:'100%',padding:'13px 4px',background:`rgba(212,175,55,.1)`,border:`1px solid ${T.gold}44`,borderRadius:'12px',color:T.gold,fontFamily:'inherit',fontSize:'16px',fontWeight:700,letterSpacing:'1px',cursor:'pointer'}}>{L.nextHand}</button>
+              {(screen==='local-game'||isHost)&&(
+                <button onClick={handleNextHand} style={{width:'100%',padding:'13px 4px',background:`rgba(212,175,55,.1)`,border:`1px solid ${T.gold}44`,borderRadius:'12px',color:T.gold,fontFamily:'inherit',fontSize:'16px',fontWeight:700,letterSpacing:'1px',cursor:'pointer'}}>{L.nextHand}</button>
+              )}
               {hasUndo&&<button className="btn-undo" style={{marginTop:'6px',width:'100%'}} onClick={doUndo}>{L.undo}</button>}
             </div>
           )}
