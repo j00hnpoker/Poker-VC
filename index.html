@@ -291,6 +291,10 @@ function buildQueue(ps,bbI,n){
   for(let i=1;i<=n;i++){const idx=(bbI+i)%n;if(!ps[idx].folded&&ps[idx].stack>0)q.push(ps[idx].id);}
   return q;
 }
+function allBetsSettled(gs){
+  const active=gs.players.filter(p=>!p.folded);
+  return active.every(p=>(gs.rBets[p.id]||0)>=gs.curBet||p.stack===0);
+}
 function collectBets(gs){
   const total=Object.values(gs.rBets).reduce((s,v)=>s+v,0);
   const newPot=gs.pot+total;
@@ -339,8 +343,9 @@ function applyCall(gs,id){
   const newPs=gs.players.map(x=>x.id===id?{...x,stack:x.stack-put}:x);
   const newRB={...gs.rBets,[id]:ab+put};
   const newQ=gs.bQueue.slice(1);
-  if(newQ.length===0)return collectBets({...gs,players:newPs,rBets:newRB});
-  return{...gs,players:newPs,rBets:newRB,bQueue:newQ};
+  const newGs2={...gs,players:newPs,rBets:newRB,bQueue:newQ};
+  if(newQ.length===0||allBetsSettled(newGs2))return collectBets(newGs2);
+  return newGs2;
 }
 function applyRaise(gs,id,raiseAmt){
   const p=gs.players.find(x=>x.id===id);
@@ -358,8 +363,9 @@ function applyRaise(gs,id,raiseAmt){
     const x=newPs[idx];
     if(!x.folded&&x.id!==id&&x.stack>0)newQ.push(x.id);
   }
-  if(newQ.length===0)return collectBets({...gs,players:newPs,rBets:newRB,curBet:newTotal,lastRaise:rSize});
-  return{...gs,players:newPs,rBets:newRB,curBet:newTotal,lastRaise:rSize,bQueue:newQ};
+  const newGs3={...gs,players:newPs,rBets:newRB,curBet:newTotal,lastRaise:rSize,bQueue:newQ};
+  if(newQ.length===0||allBetsSettled(newGs3))return collectBets(newGs3);
+  return newGs3;
 }
 function applyWin(gs,wid){
   return{...gs,players:gs.players.map(p=>p.id===wid?{...p,stack:p.stack+gs.pot}:p),pot:0};
@@ -604,6 +610,15 @@ function App(){
     if(chanRef.current&&isHost){
       chanRef.current.publish('state',{gs:newGs,timer});
     }
+  }
+  function quitGame(){
+    // Nettoyage Ably
+    if(joinIntervalRef.current){clearInterval(joinIntervalRef.current);joinIntervalRef.current=null;}
+    if(ablyRef.current){try{ablyRef.current.close();}catch(e){}}
+    ablyRef.current=null; chanRef.current=null;
+    localStorage.removeItem('vpc_screen');
+    setGs(null); setScreen('landing'); setIsHost(false);
+    setRoomCode(''); setLobbyPlayers([]); setConnMsg('');
   }
   function doNotif(msg){setNotif(msg);setTimeout(()=>setNotif(''),2400);}
 
@@ -869,13 +884,11 @@ function App(){
   const roundBets=gs?Object.values(gs.rBets||{}).reduce((s,v)=>s+v,0):0;
   const timerCrit=timer<60;
   const roundLabel=gs?L.rounds[Math.min(gs.roundNum,L.rounds.length-1)]:'';
-  // Local : toujours afficher le panel (tour par tour sur un seul écran)
-  // Online host : toujours voir et jouer (il gère tout)
-  // Online guest : seulement quand c'est son tour (son UUID)
+  // Local: tout le monde voit (1 téléphone)
+  // Online: chacun joue quand c'est son UUID — symétrique host/guest
   const isMyTurn=gs&&curActor&&(
     screen==='local-game' ||
-    (screen==='online-game' && isHost) ||
-    (screen==='online-game' && !isHost && curActor.id===myId.current)
+    (screen==='online-game' && curActor.id===myId.current)
   );
 
   // ── Shared styles ──
@@ -1049,12 +1062,12 @@ function App(){
   if(screen==='join')return(
     <div style={{minHeight:'100vh',background:T.bg,fontFamily:"'Barlow Condensed',sans-serif",color:T.text,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'20px 14px'}}>
       <style>{CSS}</style>
-      <div style={{width:'100%',maxWidth:'340px'}}>
+      <div style={{width:'100%',maxWidth:'400px',padding:'0 4px'}}>
         <button onClick={()=>setScreen('landing')} style={{background:'transparent',border:'1px solid rgba(255,255,255,.14)',color:T.dim,padding:'7px 14px',borderRadius:'8px',cursor:'pointer',fontSize:'16px',fontFamily:'inherit',marginBottom:'28px'}}>←</button>
         <div style={{fontSize:'24px',fontWeight:800,letterSpacing:'3px',color:T.gold,marginBottom:'26px'}}>{L.join}</div>
         <div style={card}>
           <label style={lbl}>{L.enterCode}</label>
-          <input value={codeInput} onChange={e=>setCodeInput(e.target.value.toUpperCase().slice(0,4))} placeholder="KQJA" style={{...inp,fontSize:'32px',letterSpacing:'14px',textAlign:'center',fontFamily:'monospace'}}/>
+          <input value={codeInput} onChange={e=>setCodeInput(e.target.value.toUpperCase().slice(0,4))} placeholder="KQJA" style={{...inp,fontSize:'28px',letterSpacing:'10px',textAlign:'center',fontFamily:'monospace',width:'100%'}}/>
         </div>
         <div style={{...card,marginBottom:'18px'}}>
           <label style={lbl}>{L.yourName}</label>
@@ -1123,6 +1136,7 @@ function App(){
           <button onClick={()=>setShowHands(h=>!h)} style={{background:showHands?'rgba(212,175,55,.18)':'transparent',border:`1px solid ${showHands?T.gold:'rgba(255,255,255,.14)'}`,color:showHands?T.gold:T.dim,padding:'6px 9px',borderRadius:'7px',cursor:'pointer',fontSize:'18px',lineHeight:1}}>📖</button>
           <button onClick={()=>{if(gs)setRenameModal({idx:0,name:gs.players[0]?.name||''}); }} style={{background:'transparent',border:'1px solid rgba(255,255,255,.14)',color:T.dim,padding:'6px 9px',borderRadius:'7px',cursor:'pointer',fontSize:'13px',fontFamily:'inherit',letterSpacing:'1px'}}>{L.editNames}</button>
           <button onClick={()=>setScreen('landing')} style={{background:'transparent',border:'1px solid rgba(255,255,255,.14)',color:T.dim,padding:'6px 9px',borderRadius:'7px',cursor:'pointer',fontSize:'16px',fontFamily:'inherit'}}>⚙</button>
+          <button onClick={quitGame} style={{background:'rgba(229,57,53,.1)',border:'1px solid rgba(229,57,53,.3)',color:'#ef5350',padding:'6px 9px',borderRadius:'7px',cursor:'pointer',fontSize:'12px',fontFamily:'inherit',fontWeight:700,letterSpacing:'1px'}}>✕</button>
         </div>
       </div>
 
@@ -1328,7 +1342,7 @@ function App(){
                   </button>
                 </div>
               ):(
-                <button onClick={()=>{setGs(null);setScreen('landing');}} style={{width:'100%',padding:'16px',background:'rgba(255,255,255,.07)',border:'1px solid rgba(255,255,255,.18)',borderRadius:'12px',color:T.dim,fontFamily:'inherit',fontSize:'16px',fontWeight:700,letterSpacing:'1px',cursor:'pointer'}}>
+                <button onClick={quitGame} style={{width:'100%',padding:'16px',background:'rgba(255,255,255,.07)',border:'1px solid rgba(255,255,255,.18)',borderRadius:'12px',color:T.dim,fontFamily:'inherit',fontSize:'16px',fontWeight:700,letterSpacing:'1px',cursor:'pointer'}}>
                   Quitter la partie
                 </button>
               )}
@@ -1353,6 +1367,30 @@ function App(){
                   </button>
                 ))}
               </div>
+              {(screen==='local-game'||isHost)&&(
+                <button onClick={handleNextHand} style={{width:'100%',padding:'13px 4px',background:`rgba(212,175,55,.1)`,border:`1px solid ${T.gold}44`,borderRadius:'12px',color:T.gold,fontFamily:'inherit',fontSize:'16px',fontWeight:700,letterSpacing:'1px',cursor:'pointer'}}>{L.nextHand}</button>
+              )}
+              {hasUndo&&<button className="btn-undo" style={{marginTop:'6px',width:'100%'}} onClick={doUndo}>{L.undo}</button>}
+            </div>
+          )}
+    </div>
+  );
+
+  return <div style={{height:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center',color:T.dim,fontFamily:"'Barlow Condensed',sans-serif",fontSize:'18px',letterSpacing:'2px'}}>Loading...</div>;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html
+              {/* Host only : désigne le gagnant */}
+              {(screen==='local-game'||isHost)?(
+
+              ):(
+                <div style={{textAlign:'center',padding:'8px 0',fontSize:'14px',color:T.dim,letterSpacing:'2px'}}>
+                  ⏳ En attente de la décision de l'hôte...
+                </div>
+              )}
               {(screen==='local-game'||isHost)&&(
                 <button onClick={handleNextHand} style={{width:'100%',padding:'13px 4px',background:`rgba(212,175,55,.1)`,border:`1px solid ${T.gold}44`,borderRadius:'12px',color:T.gold,fontFamily:'inherit',fontSize:'16px',fontWeight:700,letterSpacing:'1px',cursor:'pointer'}}>{L.nextHand}</button>
               )}
