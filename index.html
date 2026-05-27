@@ -292,6 +292,8 @@ function buildQueue(ps,bbI,n){
   return q;
 }
 function allBetsSettled(gs){
+  // Ne pas terminer prématurément si curBet=0 (sinon le 1er check clôt la main)
+  if(gs.curBet===0) return false;
   const active=gs.players.filter(p=>!p.folded);
   return active.every(p=>(gs.rBets[p.id]||0)>=gs.curBet||p.stack===0);
 }
@@ -315,6 +317,13 @@ function collectBets(gs){
 
   // Plusieurs joueurs : avancer automatiquement aux rues suivantes
   const rn=gs.roundNum||0;
+
+  // Si au plus 1 joueur a encore des jetons → showdown direct (all-in couvert)
+  const canBet=alive.filter(p=>p.stack>0);
+  if(canBet.length<=1){
+    return{...gs,pot:newPot,rBets:{},bQueue:[],phase:'showdown'};
+  }
+
   if(rn<3){
     // Auto-advance : Preflop→Flop→Turn→River
     const newQ=[];
@@ -323,6 +332,8 @@ function collectBets(gs){
       if(!gs.players[idx].folded&&gs.players[idx].stack>0)newQ.push(gs.players[idx].id);
     }
     const BB=getBlind(gs.startBlind,gs.blindLvl||0);
+    // Si la queue est vide (ex: tous all-in sauf 1) → showdown direct
+    if(newQ.length===0) return{...gs,pot:newPot,rBets:{},bQueue:[],phase:'showdown'};
     return{...gs,pot:newPot,rBets:{},bQueue:newQ,curBet:0,lastRaise:BB,phase:'betting',roundNum:rn+1};
   }
   // Après la river (round 3) → showdown
