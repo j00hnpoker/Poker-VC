@@ -232,7 +232,7 @@ const CSS=`
   @keyframes slideUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
   @keyframes popIn{0%{opacity:0;transform:translate(-50%,-50%) scale(.7)}12%{opacity:1;transform:translate(-50%,-50%) scale(1.05)}80%{opacity:1;transform:translate(-50%,-50%) scale(1)}100%{opacity:0;transform:translate(-50%,-50%) scale(.85)}}
   @keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
-  @keyframes donSlide{from{opacity:0;transform:translate(-50%,-48%)}to{opacity:1;transform:translate(-50%,-50%)}}
+  @keyframes donSlide{from{opacity:0;transform:translate(-50%,-50%) scale(.92)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
   .lb{background:transparent;border:1px solid rgba(255,255,255,.15);border-radius:7px;color:#5a6a88;padding:5px 10px;cursor:pointer;font-family:'Barlow Condensed',sans-serif;font-size:15px;font-weight:600;letter-spacing:1px;transition:all .15s;}
   .lb.on{background:rgba(212,175,55,.18);border-color:#D4AF3788;color:#D4AF37;}
   .tb{flex:1;padding:12px 4px 10px;background:transparent;border:none;border-bottom:3px solid transparent;color:#5a6a88;font-family:'Barlow Condensed',sans-serif;font-size:16px;font-weight:700;letter-spacing:2px;cursor:pointer;transition:all .2s;}
@@ -311,7 +311,9 @@ function collectBets(gs){
     if(stillAlive.length<=1){
       return{...gs,players:newPs,pot:0,rBets:{},bQueue:[],phase:'gameover'};
     }
-    // Sinon : victoire de main, pas fin de tournoi
+    // Sinon : victoire de main, mais vérifier si tournoi terminé
+    const stillHaveChips=newPs.filter(p=>p.stack>0);
+    if(stillHaveChips.length<=1) return{...gs,players:newPs,pot:0,rBets:{},bQueue:[],phase:'gameover'};
     return{...gs,players:newPs,pot:0,rBets:{},bQueue:[],phase:'foldwin'};
   }
 
@@ -489,8 +491,8 @@ function DonationModal({L,onLater,onDonate,idx,winnerName}){
   const msg=L.dm[Math.min(idx,L.dm.length-1)];
   const isFinal=idx>=19;
   return(
-    <div style={{position:'fixed',inset:0,zIndex:999,background:'rgba(0,0,0,.75)',display:'flex',alignItems:'center',justifyContent:'center',padding:'20px'}}>
-      <div style={{background:T.panel,border:`1px solid ${T.gold}44`,borderRadius:'22px',padding:'28px 22px',maxWidth:'380px',width:'100%',animation:'donSlide .3s ease',boxShadow:`0 0 40px ${T.gold}22`}}>
+    <div style={{position:'fixed',inset:0,zIndex:999,background:'rgba(0,0,0,.75)',display:'flex',alignItems:'center',justifyContent:'center',padding:'20px',backdropFilter:'blur(2px)'}}>
+      <div style={{background:T.panel,border:`1px solid ${T.gold}44`,borderRadius:'22px',padding:'28px 22px',maxWidth:'380px',width:'100%',animation:'donSlide .25s ease-out',boxShadow:`0 0 40px ${T.gold}22`}}>
         <div style={{fontSize:'46px',textAlign:'center',marginBottom:'10px'}}>{msg.e}</div>
         {winnerName&&<div style={{fontSize:'22px',fontWeight:800,color:T.gold,textAlign:'center',marginBottom:'6px',letterSpacing:'1px'}}>Bravo {winnerName} !</div>}
         <div style={{fontSize:'11px',letterSpacing:'3px',color:T.dim,textAlign:'center',marginBottom:'10px'}}>{L.donTitle.toUpperCase()}{idx<20?` (${idx+1}/20)`:''}</div>
@@ -792,6 +794,14 @@ function App(){
     const next=act(applyNextHand);
     if(next.phase==='gameover'){
       checkHandEnd(next);
+      return;
+    }
+    // Aussi vérifier si après la main, il ne reste qu'1 joueur avec chips
+    const aliveAfter=next.players.filter(p=>p.stack>0);
+    if(aliveAfter.length<=1){
+      const goNext={...next,phase:'gameover'};
+      setGs(goNext);
+      checkHandEnd(goNext);
       return;
     }
     if(eliminated.length)setTimeout(()=>doNotif(L.nElim(eliminated.join(', '))),80);
