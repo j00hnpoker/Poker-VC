@@ -1,10 +1,6 @@
 <!DOCTYPE html>
 <html lang="fr">
 <head>
-  <link rel="manifest" href="manifest.json">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-title" content="Virtual Poker Chips">
-  <meta name="theme-color" content="#D4AF37">
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"/>
   <title>Virtual Poker Chips</title>
@@ -237,6 +233,8 @@ const CSS=`
   @keyframes popIn{0%{opacity:0;transform:translate(-50%,-50%) scale(.7)}12%{opacity:1;transform:translate(-50%,-50%) scale(1.05)}80%{opacity:1;transform:translate(-50%,-50%) scale(1)}100%{opacity:0;transform:translate(-50%,-50%) scale(.85)}}
   @keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
   @keyframes donSlide{from{opacity:0;transform:translate(-50%,-50%) scale(.92)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
+  @keyframes seatPop{0%,100%{box-shadow:0 0 10px 3px #D4AF3755}50%{box-shadow:0 0 24px 6px #D4AF3799}}
+  @keyframes streetIn{0%{opacity:0;transform:translate(-50%,-50%) scale(.7)}15%{opacity:1;transform:translate(-50%,-50%) scale(1.05)}80%{opacity:1;transform:translate(-50%,-50%) scale(1)}100%{opacity:0;transform:translate(-50%,-50%) scale(.9)}}
   .lb{background:transparent;border:1px solid rgba(255,255,255,.15);border-radius:7px;color:#5a6a88;padding:5px 10px;cursor:pointer;font-family:'Barlow Condensed',sans-serif;font-size:15px;font-weight:600;letter-spacing:1px;transition:all .15s;}
   .lb.on{background:rgba(212,175,55,.18);border-color:#D4AF3788;color:#D4AF37;}
   .tb{flex:1;padding:12px 4px 10px;background:transparent;border:none;border-bottom:3px solid transparent;color:#5a6a88;font-family:'Barlow Condensed',sans-serif;font-size:16px;font-weight:700;letter-spacing:2px;cursor:pointer;transition:all .2s;}
@@ -338,9 +336,10 @@ function collectBets(gs){
       if(!gs.players[idx].folded&&gs.players[idx].stack>0)newQ.push(gs.players[idx].id);
     }
     const BB=getBlind(gs.startBlind,gs.blindLvl||0);
+    const nextRn=rn+1;
     // Si la queue est vide (ex: tous all-in sauf 1) → showdown direct
     if(newQ.length===0) return{...gs,pot:newPot,rBets:{},bQueue:[],phase:'showdown'};
-    return{...gs,pot:newPot,rBets:{},bQueue:newQ,curBet:0,lastRaise:BB,phase:'betting',roundNum:rn+1};
+    return{...gs,pot:newPot,rBets:{},bQueue:newQ,curBet:0,lastRaise:BB,phase:'betting',roundNum:nextRn,newStreet:nextRn};
   }
   // Après la river (round 3) → showdown
   return{...gs,pot:newPot,rBets:{},bQueue:[],phase:'showdown'};
@@ -570,6 +569,8 @@ function App(){
   const[renameModal,setRenameModal]=useState(null); // {idx, name}
   const[paused,setPaused]=useState(false);
   const[showHands,setShowHands]=useState(false);
+  const[streetBanner,setStreetBanner]=useState('');
+  const[confirmQuit,setConfirmQuit]=useState(false); // ex: '🃏 FLOP'
   const[tableTheme,setTableTheme]=useState(()=>localStorage.getItem('vpc_theme')||'black');
 
   // ── Online ──
@@ -604,6 +605,20 @@ function App(){
   },[gs?.phase,blindMins,lang,paused]);
 
   // ── Reset raise slider ──
+  // Détecter changement de rue → afficher banner
+  const STREET_LABELS=['','🃏 FLOP','↩ TURN','🌊 RIVER','Showdown'];
+  useEffect(()=>{
+    if(gs?.newStreet){
+      const label=STREET_LABELS[gs.newStreet]||'';
+      if(label){
+        setStreetBanner(label);
+        setTimeout(()=>setStreetBanner(''),1600);
+      }
+      // Nettoyer le flag pour éviter de re-déclencher
+      setGs(prev=>prev?{...prev,newStreet:undefined}:prev);
+    }
+  },[gs?.newStreet]);
+
   useEffect(()=>{
     if(!gs||!gs.bQueue.length)return;
     const id=gs.bQueue[0];
@@ -839,6 +854,7 @@ function App(){
     setGs(initGs);setTimer(blindMins*60);setTab('game');
     undoStack.current=[];setHasUndo(false);setSelSeat(null);
     saveLocal(initGs,blindMins*60,'local-game');
+    localStorage.setItem('vpc_last_screen','local-game');
     setScreen('local-game');
   }
   function applyRename(idx,name){
@@ -874,7 +890,9 @@ function App(){
     const initGs=makeInitGs(ps,startBlind,startChips);
     setGs(initGs);setTimer(blindMins*60);
     if(chanRef.current)chanRef.current.publish('start',{gs:initGs,blindMins});
-    setTab('game');setScreen('online-game');
+    setTab('game');
+    localStorage.setItem('vpc_last_screen','online-game');
+    setScreen('online-game');
   }
   function joinGame(){
     const code=codeInput.trim().toUpperCase();
@@ -934,7 +952,7 @@ function App(){
       <div style={{width:'100%',maxWidth:'360px',display:'flex',flexDirection:'column',gap:'14px'}}>
         {/* Resume button if game in progress */}
         {gs&&gs.phase!=='gameover'&&(
-          <button onClick={()=>setScreen(screen==='online-game'?'online-game':'local-game')} style={{padding:'20px 22px',background:`rgba(212,175,55,.12)`,border:`2px solid ${T.gold}55`,borderRadius:'16px',color:T.text,fontFamily:'inherit',cursor:'pointer',display:'flex',alignItems:'center',gap:'16px',textAlign:'left'}}>
+          <button onClick={()=>setScreen(localStorage.getItem('vpc_last_screen')||'local-game')} style={{padding:'20px 22px',background:`rgba(212,175,55,.12)`,border:`2px solid ${T.gold}55`,borderRadius:'16px',color:T.text,fontFamily:'inherit',cursor:'pointer',display:'flex',alignItems:'center',gap:'16px',textAlign:'left'}}>
             <span style={{fontSize:'32px'}}>▶</span>
             <div>
               <div style={{fontSize:'22px',fontWeight:700,letterSpacing:'2px',color:T.gold}}>REPRENDRE</div>
@@ -1161,9 +1179,48 @@ function App(){
           <button onClick={()=>setShowHands(h=>!h)} style={{background:showHands?'rgba(212,175,55,.18)':'transparent',border:`1px solid ${showHands?T.gold:'rgba(255,255,255,.14)'}`,color:showHands?T.gold:T.dim,padding:'6px 9px',borderRadius:'7px',cursor:'pointer',fontSize:'18px',lineHeight:1}}>📖</button>
           <button onClick={()=>{if(gs)setRenameModal({idx:0,name:gs.players[0]?.name||''}); }} style={{background:'transparent',border:'1px solid rgba(255,255,255,.14)',color:T.dim,padding:'6px 9px',borderRadius:'7px',cursor:'pointer',fontSize:'13px',fontFamily:'inherit',letterSpacing:'1px'}}>{L.editNames}</button>
           <button onClick={()=>setScreen('landing')} style={{background:'transparent',border:'1px solid rgba(255,255,255,.14)',color:T.dim,padding:'6px 9px',borderRadius:'7px',cursor:'pointer',fontSize:'16px',fontFamily:'inherit'}}>⚙</button>
-          <button onClick={quitGame} style={{background:'rgba(229,57,53,.1)',border:'1px solid rgba(229,57,53,.3)',color:'#ef5350',padding:'6px 9px',borderRadius:'7px',cursor:'pointer',fontSize:'12px',fontFamily:'inherit',fontWeight:700,letterSpacing:'1px'}}>✕</button>
+          <button onClick={()=>setConfirmQuit(true)} style={{background:'rgba(229,57,53,.1)',border:'1px solid rgba(229,57,53,.3)',color:'#ef5350',padding:'6px 9px',borderRadius:'7px',cursor:'pointer',fontSize:'12px',fontFamily:'inherit',fontWeight:700,letterSpacing:'1px'}}>✕</button>
         </div>
       </div>
+
+      {/* Street banner */}
+      {streetBanner&&(
+        <div style={{
+          position:'fixed',top:'50%',left:'50%',zIndex:97,
+          pointerEvents:'none',
+          animation:'streetIn 1.6s ease forwards',
+          background:'rgba(8,12,22,.92)',
+          border:`2px solid ${T.gold}`,
+          borderRadius:'20px',padding:'18px 40px',
+          color:T.gold,fontSize:'32px',fontWeight:800,
+          letterSpacing:'4px',textAlign:'center',
+          boxShadow:`0 0 40px ${T.gold}44`,
+          whiteSpace:'nowrap',
+        }}>{streetBanner}</div>
+      )}
+
+      {/* Confirmation quitter */}
+      {confirmQuit&&(
+        <div style={{position:'fixed',inset:0,zIndex:998,background:'rgba(0,0,0,.8)',display:'flex',alignItems:'center',justifyContent:'center',padding:'20px'}}>
+          <div style={{background:'#131926',border:'1px solid rgba(255,255,255,.12)',borderRadius:'18px',padding:'28px 22px',maxWidth:'320px',width:'100%',textAlign:'center'}}>
+            <div style={{fontSize:'32px',marginBottom:'12px'}}>🚪</div>
+            <div style={{fontSize:'18px',fontWeight:700,color:'#dde3f0',marginBottom:'8px',letterSpacing:'1px'}}>
+              Quitter la partie ?
+            </div>
+            <div style={{fontSize:'14px',color:'#5a6a88',marginBottom:'22px',lineHeight:1.5}}>
+              La partie en cours sera perdue.
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
+              <button onClick={()=>setConfirmQuit(false)} style={{padding:'13px',background:'transparent',border:'1px solid rgba(255,255,255,.15)',borderRadius:'10px',color:'#dde3f0',fontFamily:"'Barlow Condensed',sans-serif",fontSize:'16px',fontWeight:600,cursor:'pointer',letterSpacing:'1px'}}>
+                ANNULER
+              </button>
+              <button onClick={()=>{setConfirmQuit(false);quitGame();}} style={{padding:'13px',background:'rgba(229,57,53,.15)',border:'1px solid rgba(229,57,53,.4)',borderRadius:'10px',color:'#ef5350',fontFamily:"'Barlow Condensed',sans-serif",fontSize:'16px',fontWeight:700,cursor:'pointer',letterSpacing:'1px'}}>
+                QUITTER
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Hands overlay */}
       {showHands&&(
@@ -1232,14 +1289,23 @@ function App(){
               const bet=gs.rBets?.[p.id]||0;
               return(
                 <div key={p.id}>
-                  <div onClick={()=>handleSeatTap(i)} style={{position:'absolute',left:`${pos.left}%`,top:`${pos.top}%`,transform:'translate(-50%,-50%)',width:'96px',
+                  <div onClick={()=>handleSeatTap(i)} style={{position:'absolute',left:`${pos.left}%`,top:`${pos.top}%`,
+                    transform:(()=>{
+                      if(!isCur)return'translate(-50%,-50%)';
+                      // Avancer vers le centre de ~6%
+                      const dx=(50-pos.left)*0.12;
+                      const dy=(50-pos.top)*0.12;
+                      return`translate(calc(-50% + ${dx.toFixed(1)}%), calc(-50% + ${dy.toFixed(1)}%)) scale(1.08)`;
+                    })(),
+                    width:'96px',
                     background:p.folded?'rgba(14,18,30,.6)':isCur?'rgba(22,28,44,.98)':'rgba(18,23,38,.95)',
                     border:isSel?`2px solid ${T.blue}`:isCur?`2px solid ${T.gold}`:p.folded?'1px solid rgba(255,255,255,.04)':'1px solid rgba(255,255,255,.1)',
                     borderRadius:'12px',padding:'8px 5px 7px',
                     display:'flex',flexDirection:'column',alignItems:'center',
                     opacity:p.folded?0.35:1,
-                    animation:isSel?'glowSel 1.4s ease infinite':isCur?'glow 1.6s ease infinite':'none',
-                    transition:'opacity .3s',zIndex:isCur||isSel?5:2,
+                    animation:isSel?'glowSel 1.4s ease infinite':isCur?'seatPop 1.6s ease infinite':'none',
+                    transition:'transform .3s ease, opacity .3s, border-color .2s',
+                    zIndex:isCur||isSel?5:2,
                     cursor:gs.phase!=='betting'?'pointer':'default'}}>
                     <div style={{display:'flex',alignItems:'center',gap:'3px',marginBottom:'3px'}}>
                       <div style={{width:'16px',height:'16px',borderRadius:'50%',background:p.color,flexShrink:0,boxShadow:isCur?`0 0 7px ${p.color}`:'none'}}/>
@@ -1248,10 +1314,10 @@ function App(){
                       {isBB&&<span style={{fontSize:'10px',fontWeight:800,background:T.red,color:'#fff',borderRadius:'4px',padding:'0 4px',lineHeight:'15px'}}>BB</span>}
                     </div>
                     <div onClick={(e)=>{e.stopPropagation();if(gs.phase!=='betting')setRenameModal({idx:i,name:p.name});}}
-                      style={{fontSize:'16px',fontWeight:700,color:p.folded?T.dim:isCur?T.cream:T.text,maxWidth:'88px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',textAlign:'center',cursor:'pointer',textTransform:'uppercase',letterSpacing:'.5px'}}>
+                      style={{fontSize:isCur?'18px':'16px',fontWeight:isCur?800:700,color:p.folded?T.dim:isCur?T.cream:T.text,maxWidth:'88px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',textAlign:'center',cursor:'pointer',textTransform:'uppercase',letterSpacing:'.5px',transition:'font-size .2s'}}>
                       {p.folded?'– – –':p.name}
                     </div>
-                    {!p.folded&&<div style={{fontSize:'16px',fontWeight:700,fontFamily:'monospace',color:isCur?T.gold:'rgba(212,175,55,.75)',marginTop:'2px'}}>{fmt(p.stack)}</div>}
+                    {!p.folded&&<div style={{fontSize:isCur?'18px':'16px',fontWeight:700,fontFamily:'monospace',color:isCur?T.gold:'rgba(212,175,55,.75)',marginTop:'2px',transition:'font-size .2s'}}>{fmt(p.stack)}</div>}
                   </div>
                   {bet>0&&!p.folded&&(
                     <div style={{position:'absolute',left:`${bp.left}%`,top:`${bp.top}%`,transform:'translate(-50%,-50%)',background:'rgba(212,175,55,.18)',border:`1px solid ${T.gold}44`,borderRadius:'10px',padding:'3px 10px',fontSize:'14px',fontWeight:700,color:T.gold,fontFamily:'monospace',pointerEvents:'none',zIndex:3,whiteSpace:'nowrap'}}>{fmt(bet)}</div>
@@ -1368,7 +1434,7 @@ function App(){
                 </div>
               ):(
                 <button onClick={quitGame} style={{width:'100%',padding:'16px',background:'rgba(255,255,255,.07)',border:'1px solid rgba(255,255,255,.18)',borderRadius:'12px',color:T.dim,fontFamily:'inherit',fontSize:'16px',fontWeight:700,letterSpacing:'1px',cursor:'pointer'}}>
-                  Quitter la partie
+                  Quitter
                 </button>
               )}
             </div>
@@ -1381,39 +1447,21 @@ function App(){
                 <span style={{fontSize:'14px',letterSpacing:'3px',color:T.dim}}>{L.showdown}</span>
                 <span style={{fontFamily:'monospace',fontSize:'22px',fontWeight:700,color:T.gold}}>{fmt(gs.pot)} {L.inPot}</span>
               </div>
-              <div style={{display:'grid',gridTemplateColumns:`repeat(${Math.min(active.length,4)},1fr)`,gap:'8px',marginBottom:'10px'}}>
-                {active.map(p=>(
-                  <button key={p.id} onClick={()=>handleWin(p.id)} style={{padding:'12px 4px',background:`rgba(212,175,55,.12)`,border:`1px solid ${T.gold}44`,borderRadius:'12px',color:T.gold,fontFamily:'inherit',fontSize:'16px',fontWeight:700,cursor:'pointer'}}>
-                    <div style={{display:'flex',alignItems:'center',gap:'5px',justifyContent:'center',marginBottom:'3px'}}>
-                      <div style={{width:'10px',height:'10px',borderRadius:'50%',background:p.color}}/>
-                      <span style={{fontSize:'14px',maxWidth:'60px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',textTransform:'uppercase'}}>{p.name}</span>
-                    </div>
-                    {L.wins}
-                  </button>
-                ))}
-              </div>
-              {(screen==='local-game'||isHost)&&(
-                <button onClick={handleNextHand} style={{width:'100%',padding:'13px 4px',background:`rgba(212,175,55,.1)`,border:`1px solid ${T.gold}44`,borderRadius:'12px',color:T.gold,fontFamily:'inherit',fontSize:'16px',fontWeight:700,letterSpacing:'1px',cursor:'pointer'}}>{L.nextHand}</button>
-              )}
-              {hasUndo&&<button className="btn-undo" style={{marginTop:'6px',width:'100%'}} onClick={doUndo}>{L.undo}</button>}
-            </div>
-          )}
-    </div>
-  );
-
-  return <div style={{height:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center',color:T.dim,fontFamily:"'Barlow Condensed',sans-serif",fontSize:'18px',letterSpacing:'2px'}}>Loading...</div>;
-}
-
-ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
-</script>
-</body>
-</html
-              {/* Host only : désigne le gagnant */}
               {(screen==='local-game'||isHost)?(
-
+                <div style={{display:'grid',gridTemplateColumns:`repeat(${Math.min(active.length,4)},1fr)`,gap:'8px',marginBottom:'10px'}}>
+                  {active.map(p=>(
+                    <button key={p.id} onClick={()=>handleWin(p.id)} style={{padding:'12px 4px',background:`rgba(212,175,55,.12)`,border:`1px solid ${T.gold}44`,borderRadius:'12px',color:T.gold,fontFamily:'inherit',fontSize:'16px',fontWeight:700,cursor:'pointer'}}>
+                      <div style={{display:'flex',alignItems:'center',gap:'5px',justifyContent:'center',marginBottom:'3px'}}>
+                        <div style={{width:'10px',height:'10px',borderRadius:'50%',background:p.color}}/>
+                        <span style={{fontSize:'14px',maxWidth:'60px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',textTransform:'uppercase'}}>{p.name}</span>
+                      </div>
+                      {L.wins}
+                    </button>
+                  ))}
+                </div>
               ):(
-                <div style={{textAlign:'center',padding:'8px 0',fontSize:'14px',color:T.dim,letterSpacing:'2px'}}>
-                  ⏳ En attente de la décision de l'hôte...
+                <div style={{textAlign:'center',padding:'10px 0',fontSize:'14px',color:'#5a6a88',letterSpacing:'1px'}}>
+                  En attente de la decision de l'hote...
                 </div>
               )}
               {(screen==='local-game'||isHost)&&(
@@ -1429,6 +1477,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+
 </script>
 </body>
 </html>
