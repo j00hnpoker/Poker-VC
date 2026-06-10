@@ -19,14 +19,59 @@
 const{useState,useEffect,useRef}=React;
 
 // ── CONFIG ────────────────────────────────────────────────────────────────
-const ABLY_KEY  ='tfGBNw.ZRKIUw:CeKry3BPPS-i7hBViYg5fpqh_uRSevvTqil7CwaLF1w';
-const SENTRY_DSN='https://b6833dfd8b71566b5009a22983b9542d@o4511455498141696.ingest.de.sentry.io/4511455526322256';
-const DONATE_URL = 'https://buymeacoffee.com/virtualpokerchips';
-const APP_URL = 'https://j00hnpoker.github.io/Poker-VC';
+const ABLY_KEY  ='YOUR_ABLY_API_KEY';
+const SENTRY_DSN='YOUR_SENTRY_DSN';
+const DONATE_URL='YOUR_DONATION_URL';
+const APP_URL   =window.location.origin+window.location.pathname;
 
 if(SENTRY_DSN!=='YOUR_SENTRY_DSN'&&typeof Sentry!=='undefined')
   Sentry.init({dsn:SENTRY_DSN,tracesSampleRate:0.2});
 function captureErr(e){if(typeof Sentry!=='undefined')Sentry.captureException(e);}
+
+// ── SONS ──────────────────────────────────────────────────────────────────────
+const SFX=(()=>{
+  let ctx=null;
+  function ac(){
+    if(!ctx)ctx=new(window.AudioContext||window.webkitAudioContext)();
+    if(ctx.state==='suspended')ctx.resume();
+    return ctx;
+  }
+  function chip(freq=3500,vol=0.5,dur=0.06,delay=0){
+    try{
+      const c=ac(),t=c.currentTime+delay;
+      const buf=c.createBuffer(1,Math.ceil(c.sampleRate*dur),c.sampleRate);
+      const d=buf.getChannelData(0);
+      for(let i=0;i<d.length;i++)d[i]=(Math.random()*2-1)*Math.exp(-i/(d.length*0.25));
+      const src=c.createBufferSource(),flt=c.createBiquadFilter(),g=c.createGain();
+      flt.type='bandpass';flt.frequency.value=freq;flt.Q.value=8;
+      src.buffer=buf;src.connect(flt);flt.connect(g);g.connect(c.destination);
+      g.gain.setValueAtTime(vol,t);g.gain.exponentialRampToValueAtTime(0.001,t+dur);
+      src.start(t);
+    }catch(e){}
+  }
+  function tone(freq,dur,vol=0.2,delay=0,type='sine'){
+    try{
+      const c=ac(),t=c.currentTime+delay;
+      const osc=c.createOscillator(),g=c.createGain();
+      osc.type=type;osc.frequency.value=freq;
+      osc.connect(g);g.connect(c.destination);
+      g.gain.setValueAtTime(vol,t);g.gain.exponentialRampToValueAtTime(0.001,t+dur);
+      osc.start(t);osc.stop(t+dur+0.05);
+    }catch(e){}
+  }
+  let muted=localStorage.getItem('vpc_muted')==='1';
+  return{
+    get muted(){return muted;},
+    toggle(){muted=!muted;localStorage.setItem('vpc_muted',muted?'1':'0');return muted;},
+    fold(){   if(muted)return;tone(220,0.25,0.18);tone(180,0.2,0.12,0.08);},
+    call(){   if(muted)return;chip(3200,0.45);},
+    check(){  if(muted)return;chip(2800,0.3);},
+    raise(){  if(muted)return;chip(3500,0.5);chip(3800,0.4,0.06,0.07);chip(4000,0.35,0.06,0.14);},
+    allin(){  if(muted)return;for(let i=0;i<7;i++)chip(3200+i*150,0.6,0.07,i*0.04);tone(600,0.4,0.15,0.05,'triangle');},
+    street(){ if(muted)return;tone(480,0.15,0.12);tone(600,0.12,0.1,0.12);tone(750,0.1,0.1,0.22);},
+    win(){    if(muted)return;[0,.12,.24,.36].forEach((d,i)=>tone(400+i*120,0.4,0.2,d));},
+  };
+})();
 
 // ── DONATION MESSAGES ─────────────────────────────────────────────────────
 const DMG_FR=[
@@ -293,6 +338,27 @@ function buildQueue(ps,bbI,n){
   for(let i=1;i<=n;i++){const idx=(bbI+i)%n;if(!ps[idx].folded&&ps[idx].stack>0)q.push(ps[idx].id);}
   return q;
 }
+function computeSidePots(players, handBets){
+  const active=players.filter(p=>!p.folded);
+  if(active.length<=1)return null; // pas besoin
+  const contribs=active.map(p=>({id:p.id,name:p.name,color:p.color,amount:handBets[p.id]||0}));
+  const allSame=contribs.every(c=>c.amount===contribs[0].amount);
+  if(allSame)return null; // pas de side pot
+  const sorted=[...contribs].sort((a,b)=>a.amount-b.amount);
+  const pots=[];
+  let eligible=sorted.map(c=>c.id);
+  let prev=0;
+  for(let i=0;i<sorted.length;i++){
+    const curr=sorted[i].amount;
+    if(curr>prev&&eligible.length>0){
+      pots.push({amount:(curr-prev)*eligible.length, eligible:[...eligible]});
+      prev=curr;
+    }
+    eligible=eligible.filter(id=>id!==sorted[i].id);
+  }
+  return pots.length>0?pots:null;
+}
+
 function allBetsSettled(gs){
   // Ne pas terminer prématurément si curBet=0 (sinon le 1er check clôt la main)
   if(gs.curBet===0) return false;
@@ -302,6 +368,9 @@ function allBetsSettled(gs){
 function collectBets(gs){
   const total=Object.values(gs.rBets).reduce((s,v)=>s+v,0);
   const newPot=gs.pot+total;
+  // Accumuler les mises par joueur pour le calcul des side pots
+  const newHandBets={...(gs.handBets||{})};
+  Object.entries(gs.rBets).forEach(([id,amt])=>{newHandBets[id]=(newHandBets[id]||0)+amt;});
   const alive=gs.players.filter(p=>!p.folded);
 
   // Un seul joueur actif (tous les autres ont foldé)
@@ -311,12 +380,12 @@ function collectBets(gs){
     // Vérifier si le tournoi est terminé (les autres sont-ils à 0 ?)
     const stillAlive=newPs.filter(p=>p.stack>0);
     if(stillAlive.length<=1){
-      return{...gs,players:newPs,pot:0,rBets:{},bQueue:[],phase:'gameover'};
+      return{...gs,players:newPs,pot:0,rBets:{},bQueue:[],phase:'gameover',handBets:{}};
     }
     // Sinon : victoire de main, mais vérifier si tournoi terminé
     const stillHaveChips=newPs.filter(p=>p.stack>0);
     if(stillHaveChips.length<=1) return{...gs,players:newPs,pot:0,rBets:{},bQueue:[],phase:'gameover'};
-    return{...gs,players:newPs,pot:0,rBets:{},bQueue:[],phase:'foldwin'};
+    return{...gs,players:newPs,pot:0,rBets:{},bQueue:[],phase:'foldwin',handBets:{}};
   }
 
   // Plusieurs joueurs : avancer automatiquement aux rues suivantes
@@ -325,7 +394,7 @@ function collectBets(gs){
   // Si au plus 1 joueur a encore des jetons → showdown direct (all-in couvert)
   const canBet=alive.filter(p=>p.stack>0);
   if(canBet.length<=1){
-    return{...gs,pot:newPot,rBets:{},bQueue:[],phase:'showdown'};
+    return{...gs,pot:newPot,rBets:{},bQueue:[],phase:'showdown',handBets:newHandBets,storedSidePots:computeSidePots(alive,newHandBets)};
   }
 
   if(rn<3){
@@ -338,11 +407,11 @@ function collectBets(gs){
     const BB=getBlind(gs.startBlind,gs.blindLvl||0);
     const nextRn=rn+1;
     // Si la queue est vide (ex: tous all-in sauf 1) → showdown direct
-    if(newQ.length===0) return{...gs,pot:newPot,rBets:{},bQueue:[],phase:'showdown'};
-    return{...gs,pot:newPot,rBets:{},bQueue:newQ,curBet:0,lastRaise:BB,phase:'betting',roundNum:nextRn,newStreet:nextRn};
+    if(newQ.length===0) return{...gs,pot:newPot,rBets:{},bQueue:[],phase:'showdown',storedSidePots:computeSidePots(alive,newHandBets||{}),handBets:newHandBets||{}};
+    return{...gs,pot:newPot,rBets:{},bQueue:newQ,curBet:0,lastRaise:BB,phase:'betting',roundNum:nextRn,newStreet:nextRn,handBets:newHandBets};
   }
   // Après la river (round 3) → showdown
-  return{...gs,pot:newPot,rBets:{},bQueue:[],phase:'showdown'};
+  return{...gs,pot:newPot,rBets:{},bQueue:[],phase:'showdown',handBets:newHandBets,storedSidePots:computeSidePots(gs.players.filter(p=>!p.folded),newHandBets)};
 }
 function applyFold(gs,id){
   const newPs=gs.players.map(p=>p.id===id?{...p,folded:true}:p);
@@ -368,8 +437,10 @@ function applyRaise(gs,id,raiseAmt){
   const ab=gs.rBets[id]||0;
   const put=Math.min(raiseAmt-ab,p.stack);
   const newTotal=ab+put;
+  // All-in pour moins que le curBet = call (le curBet ne descend jamais)
+  if(newTotal<=gs.curBet) return applyCall(gs,id);
   const BB=getBlind(gs.startBlind,gs.blindLvl);
-  const rSize=Math.max(newTotal-gs.curBet,BB);
+  const rSize=newTotal-gs.curBet; // taille réelle de la relance
   const newPs=gs.players.map(x=>x.id===id?{...x,stack:x.stack-put}:x);
   const newRB={...gs.rBets,[id]:newTotal};
   const raiserI=gs.players.findIndex(x=>x.id===id);
@@ -418,7 +489,8 @@ function applyNextHand(gs){
   const initRB={[alive[nSb].id]:sbP,[alive[nBb].id]:bbP};
   return{...gs,players:newPs,dIdx:nD,bQueue:buildQueue(newPs,nBb,n),
     curBet:BB,rBets:initRB,lastRaise:BB,pot:0,phase:'betting',
-    roundNum:0,handNum:gs.handNum+1};
+    roundNum:0,handNum:gs.handNum+1,handBets:{},
+    storedSidePots:null,sidePotIdx:0};
 }
 
 // ── COMPONENTS ────────────────────────────────────────────────────────────
@@ -570,7 +642,8 @@ function App(){
   const[paused,setPaused]=useState(false);
   const[showHands,setShowHands]=useState(false);
   const[streetBanner,setStreetBanner]=useState('');
-  const[confirmQuit,setConfirmQuit]=useState(false); // ex: '🃏 FLOP'
+  const[confirmQuit,setConfirmQuit]=useState(false);
+  const[soundOn,setSoundOn]=useState(!SFX.muted); // ex: '🃏 FLOP'
   const[tableTheme,setTableTheme]=useState(()=>localStorage.getItem('vpc_theme')||'black');
 
   // ── Online ──
@@ -605,6 +678,16 @@ function App(){
   },[gs?.phase,blindMins,lang,paused]);
 
   // ── Reset raise slider ──
+  // Stocker storedSidePots si calculé live (stabilisation entre renders)
+  React.useEffect(()=>{
+    if(gs?.phase==='showdown'&&(!gs.storedSidePots)&&gs.handBets&&Object.keys(gs.handBets).length>0){
+      const sp=computeSidePots(gs.players.filter(p=>!p.folded),gs.handBets);
+      if(sp){
+        setGs(prev=>prev&&prev.phase==='showdown'&&!prev.storedSidePots?{...prev,storedSidePots:sp}:prev);
+      }
+    }
+  },[gs?.phase,gs?.pot]);
+
   // Détecter changement de rue → afficher banner
   const STREET_LABELS=['','🃏 FLOP','↩ TURN','🌊 RIVER','Showdown'];
   useEffect(()=>{
@@ -612,6 +695,7 @@ function App(){
       const label=STREET_LABELS[gs.newStreet]||'';
       if(label){
         setStreetBanner(label);
+        SFX.street();
         setTimeout(()=>setStreetBanner(''),1600);
       }
       // Nettoyer le flag pour éviter de re-déclencher
@@ -789,22 +873,112 @@ function App(){
     }
   }
   function handleFold(){
+    SFX.fold();
     if(isGuest()){ sendAction('fold'); return; }
     const next=act(applyFold,gs.bQueue[0]);
     checkHandEnd(next);
   }
   function handleCall(){
+    isCheck?SFX.check():SFX.call();
     if(isGuest()){ sendAction('call'); return; }
     act(applyCall,gs.bQueue[0]);
   }
   function handleRaise(amt){
+    isAllIn?SFX.allin():SFX.raise();
     if(isGuest()){ sendAction('raise', amt); return; }
     act(applyRaise,gs.bQueue[0],amt);
   }
+  // Distribue tous les pots où le joueur est éligible (shortcut "gagne la main")
+  function handleWinAll(pid){
+    const winner=gs.players.find(p=>p.id===pid);
+    if(!winner)return;
+    SFX.win();
+    const allPots=gs.storedSidePots||[];
+    const startIdx=gs.sidePotIdx||0;
+    let curPs=[...gs.players];
+    let curPot=gs.pot;
+    let curIdx=startIdx;
+    let wonByWinner=0; // ce que gagne spécifiquement ce joueur
+    // Distribuer tous les pots où pid est éligible
+    while(curIdx<allPots.length){
+      const sp=allPots[curIdx];
+      if(!sp)break;
+      const eligible=curPs.filter(p=>!p.folded&&sp.eligible.includes(p.id));
+      if(eligible.some(p=>p.id===pid)){
+        // Ce joueur est éligible → lui donner
+        curPs=curPs.map(p=>p.id===pid?{...p,stack:p.stack+sp.amount}:p);
+        curPot=Math.max(0,curPot-sp.amount);
+        wonByWinner+=sp.amount; // compter seulement ce qu'il gagne
+        curIdx++;
+      } else if(eligible.length===1){
+        // Un seul autre éligible → auto-retourner (ne compte pas dans les gains du vainqueur)
+        const autoId=eligible[0].id;
+        curPs=curPs.map(p=>p.id===autoId?{...p,stack:p.stack+sp.amount}:p);
+        curPot=Math.max(0,curPot-sp.amount);
+        curIdx++;
+      } else {
+        break; // Plusieurs éligibles sans notre joueur → arrêter
+      }
+    }
+    const next={...gs,players:curPs,pot:curPot,sidePotIdx:curIdx};
+    setGs(next);publishState(next);
+    doNotif(L.nWinsP(winner.name,fmt(wonByWinner)));
+    if(curPot<=0){
+      const stillAlive=curPs.filter(p=>p.stack>0);
+      if(stillAlive.length<=1){
+        const go={...next,phase:'gameover'};
+        setGs(go);checkHandEnd(go);
+      }
+    }
+  }
+
+  function handleWinPot(pid, amount, nextPotIdx){
+    const winner=gs.players.find(p=>p.id===pid);
+    if(!winner)return;
+    SFX.win();
+    let curPs=gs.players.map(p=>p.id===pid?{...p,stack:p.stack+amount}:p);
+    let curPot=Math.max(0,gs.pot-amount);
+    let curIdx=nextPotIdx||0;
+    const allPots=gs.storedSidePots||[];
+    // Auto-cascade les pots non couverts (1 seul éligible)
+    while(curIdx<allPots.length){
+      const sp=allPots[curIdx];
+      if(!sp)break;
+      const eligible=curPs.filter(p=>!p.folded&&sp.eligible.includes(p.id));
+      if(eligible.length===1){
+        // Auto-distribuer sans clic
+        const autoId=eligible[0].id;
+        curPs=curPs.map(p=>p.id===autoId?{...p,stack:p.stack+sp.amount}:p);
+        curPot=Math.max(0,curPot-sp.amount);
+        curIdx++;
+      } else break;
+    }
+    const next={...gs,players:curPs,pot:curPot,sidePotIdx:curIdx};
+    setGs(next);
+    publishState(next);
+    doNotif(L.nWinsP(winner.name,fmt(amount)));
+    if(curPot<=0){
+      const stillAlive=curPs.filter(p=>p.stack>0);
+      if(stillAlive.length<=1){
+        const go={...next,phase:'gameover'};
+        setGs(go);checkHandEnd(go);
+      }
+    }
+  }
   function handleWin(pid){
     const winner=gs.players.find(p=>p.id===pid);
-    const next=act(applyWin,pid);
-    doNotif(L.nWinsP(winner.name,fmt(gs.pot)));
+    if(!winner)return;
+    SFX.win();
+    const potAmt=gs.pot;
+    const newPs=gs.players.map(p=>p.id===pid?{...p,stack:p.stack+potAmt}:p);
+    const next={...gs,players:newPs,pot:0};
+    doNotif(L.nWinsP(winner.name,fmt(potAmt)));
+    const stillAlive=newPs.filter(p=>p.stack>0);
+    // setGs ONCE avec l'état final correct
+    const finalGs=stillAlive.length<=1?{...next,phase:'gameover'}:next;
+    setGs(finalGs);
+    publishState(finalGs);
+    if(stillAlive.length<=1)checkHandEnd(finalGs);
   }
   function handleNextStreet(){act(applyNextStreet);}
   function handleNextHand(){
@@ -917,6 +1091,8 @@ function App(){
   const minRaiseAmt=curActor?Math.min(Math.max((gs?.curBet||0)+Math.max(gs?.lastRaise||0,BB_now), BB_now*2), actorAllIn):0;
   const raiseAmtIsAllIn=raiseAmt>=actorAllIn&&actorAllIn>0;
   const isAllIn=raiseAmtIsAllIn;
+  const othersAllIn=gs&&curActor?gs.players.filter(p=>!p.folded&&p.id!==curActor.id).every(p=>p.stack===0):false;
+  const canShowRaise=!othersAllIn;
   // Preset buttons
   const halfPot=Math.min(Math.max(Math.round((gs?.pot||0)/2), minRaiseAmt), actorAllIn);
   const fullPot=Math.min(Math.max(gs?.pot||0, minRaiseAmt), actorAllIn);
@@ -925,6 +1101,16 @@ function App(){
     {label:'Pot',   val:fullPot},
   ].filter((p,i,arr)=>i===0||p.val!==arr[i-1].val):[];
   const roundBets=gs?Object.values(gs.rBets||{}).reduce((s,v)=>s+v,0):0;
+  // Side pots
+  // Toujours recalculer les side pots en live depuis handBets pour garantir la fraîcheur
+  const sidePots=(()=>{
+    if(!gs||gs.phase!=='showdown')return null;
+    const stored=gs.storedSidePots;
+    if(stored&&stored.length>0)return stored;
+    // Recalcul live depuis handBets actuel
+    const liveSP=computeSidePots(gs.players.filter(p=>!p.folded),gs.handBets||{});
+    return liveSP;
+  })();
   const timerCrit=timer<60;
   const roundLabel=gs?L.rounds[Math.min(gs.roundNum,L.rounds.length-1)]:'';
   // Local: tout le monde voit (1 téléphone)
@@ -1179,6 +1365,7 @@ function App(){
           <button onClick={()=>setShowHands(h=>!h)} style={{background:showHands?'rgba(212,175,55,.18)':'transparent',border:`1px solid ${showHands?T.gold:'rgba(255,255,255,.14)'}`,color:showHands?T.gold:T.dim,padding:'6px 9px',borderRadius:'7px',cursor:'pointer',fontSize:'18px',lineHeight:1}}>📖</button>
           <button onClick={()=>{if(gs)setRenameModal({idx:0,name:gs.players[0]?.name||''}); }} style={{background:'transparent',border:'1px solid rgba(255,255,255,.14)',color:T.dim,padding:'6px 9px',borderRadius:'7px',cursor:'pointer',fontSize:'13px',fontFamily:'inherit',letterSpacing:'1px'}}>{L.editNames}</button>
           <button onClick={()=>setScreen('landing')} style={{background:'transparent',border:'1px solid rgba(255,255,255,.14)',color:T.dim,padding:'6px 9px',borderRadius:'7px',cursor:'pointer',fontSize:'16px',fontFamily:'inherit'}}>⚙</button>
+          <button onClick={()=>{const m=SFX.toggle();setSoundOn(!m);}} style={{background:'transparent',border:'1px solid rgba(255,255,255,.14)',color:soundOn?T.gold:T.dim,padding:'6px 9px',borderRadius:'7px',cursor:'pointer',fontSize:'16px'}}>{soundOn?'🔊':'🔇'}</button>
           <button onClick={()=>setConfirmQuit(true)} style={{background:'rgba(229,57,53,.1)',border:'1px solid rgba(229,57,53,.3)',color:'#ef5350',padding:'6px 9px',borderRadius:'7px',cursor:'pointer',fontSize:'12px',fontFamily:'inherit',fontWeight:700,letterSpacing:'1px'}}>✕</button>
         </div>
       </div>
@@ -1318,6 +1505,11 @@ function App(){
                       {p.folded?'– – –':p.name}
                     </div>
                     {!p.folded&&<div style={{fontSize:isCur?'18px':'16px',fontWeight:700,fontFamily:'monospace',color:isCur?T.gold:'rgba(212,175,55,.75)',marginTop:'2px',transition:'font-size .2s'}}>{fmt(p.stack)}</div>}
+                    {!p.folded&&gs.rBets[p.id]>0&&(
+                      <div style={{fontSize:'11px',fontFamily:'monospace',color:'rgba(255,140,0,.85)',marginTop:'1px',background:'rgba(255,140,0,.12)',borderRadius:'4px',padding:'0 4px',lineHeight:'14px'}}>
+                        ↑{fmt(gs.rBets[p.id])}
+                      </div>
+                    )}
                   </div>
                   {bet>0&&!p.folded&&(
                     <div style={{position:'absolute',left:`${bp.left}%`,top:`${bp.top}%`,transform:'translate(-50%,-50%)',background:'rgba(212,175,55,.18)',border:`1px solid ${T.gold}44`,borderRadius:'10px',padding:'3px 10px',fontSize:'14px',fontWeight:700,color:T.gold,fontFamily:'monospace',pointerEvents:'none',zIndex:3,whiteSpace:'nowrap'}}>{fmt(bet)}</div>
@@ -1330,8 +1522,8 @@ function App(){
             {(()=>{
               const dPos=seatPos(gs.dIdx,np);
               const ctr={left:50,top:50};
-              const px=dPos.left+(ctr.left-dPos.left)*0.38;
-              const py=dPos.top+(ctr.top-dPos.top)*0.38;
+              const px=dPos.left+(ctr.left-dPos.left)*0.55;
+              const py=dPos.top+(ctr.top-dPos.top)*0.55;
               return(
                 <div style={{position:'absolute',left:`${px}%`,top:`${py}%`,transform:'translate(-50%,-50%)',
                   width:'32px',height:'32px',borderRadius:'50%',
@@ -1359,22 +1551,24 @@ function App(){
 
               {/* Bet amount selector */}
               <div style={{marginBottom:'14px'}}>
-                {/* Winamax compact raise row */}
+                {canShowRaise&&(
                 <div style={{display:'flex',alignItems:'center',gap:'6px',marginBottom:'5px'}}>
                   <span style={{fontSize:'11px',letterSpacing:'2px',color:T.dim,flexShrink:0}}>{gs.curBet===0?L.betLbl:L.raiseLbl}</span>
                   <span style={{flex:1,fontFamily:'monospace',fontSize:'20px',fontWeight:800,color:raiseAmtIsAllIn?T.red:T.gold,textAlign:'center'}}>{raiseAmtIsAllIn?L.allinB:fmt(raiseAmt)}</span>
                   <button onClick={()=>setRaiseAmt(a=>Math.max(minRaiseAmt,a-BB_now))} style={{padding:'4px 9px',background:'rgba(255,255,255,.07)',border:'1px solid rgba(255,255,255,.14)',borderRadius:'7px',color:T.text,fontFamily:'inherit',fontSize:'15px',fontWeight:700,cursor:'pointer'}}>−BB</button>
                   <button onClick={()=>setRaiseAmt(a=>Math.min(actorAllIn,a+BB_now))} style={{padding:'4px 9px',background:'rgba(255,255,255,.07)',border:'1px solid rgba(255,255,255,.14)',borderRadius:'7px',color:T.text,fontFamily:'inherit',fontSize:'15px',fontWeight:700,cursor:'pointer'}}>+BB</button>
                   <button onClick={()=>setRaiseAmt(actorAllIn)} style={{padding:'4px 9px',background:raiseAmtIsAllIn?'rgba(229,57,53,.2)':'rgba(255,255,255,.07)',border:`1px solid ${raiseAmtIsAllIn?T.red:'rgba(255,255,255,.14)'}`,borderRadius:'7px',color:raiseAmtIsAllIn?T.red:T.dim,fontFamily:'inherit',fontSize:'11px',fontWeight:800,cursor:'pointer',letterSpacing:'1px'}}>ALL IN</button>
-                </div>
+                </div>)}
                 <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'6px'}}>
                   <button className="btn-r" onClick={handleFold} style={{padding:'10px 4px',fontSize:'15px'}}>{L.fold}</button>
                   <button className="btn-b" onClick={handleCall} style={{padding:'10px 4px',fontSize:'15px'}}>
                     {isCheck?L.check:<>{owed<=curActor.stack?L.call:L.allinC}<br/><span style={{fontSize:'12px',fontFamily:'monospace'}}>{fmt(Math.min(owed,curActor.stack))}</span></>}
                   </button>
-                  <button className="btn-g" onClick={()=>handleRaise(raiseAmt)} style={{padding:'10px 4px',fontSize:'15px'}}>
-                    {isAllIn?L.allinB:gs.curBet===0?<>{L.bet}<br/><span style={{fontSize:'12px',fontFamily:'monospace'}}>{fmt(raiseAmt)}</span></>:<>{L.raise}<br/><span style={{fontSize:'12px',fontFamily:'monospace'}}>{fmt(raiseAmt)}</span></>}
-                  </button>
+                  {canShowRaise&&(
+                    <button className="btn-g" onClick={()=>handleRaise(raiseAmt)} style={{padding:'10px 4px',fontSize:'15px'}}>
+                      {isAllIn?L.allinB:gs.curBet===0?<>{L.bet}<br/><span style={{fontSize:'12px',fontFamily:'monospace'}}>{fmt(raiseAmt)}</span></>:<>{L.raise}<br/><span style={{fontSize:'12px',fontFamily:'monospace'}}>{fmt(raiseAmt)}</span></>}
+                    </button>
+                  )}
                   {hasUndo&&<button className="btn-undo" onClick={doUndo}>{L.undo}</button>}
                 </div>
               </div>
@@ -1443,11 +1637,117 @@ function App(){
           {/* SHOWDOWN */}
           {gs.phase==='showdown'&&(
             <div style={{background:T.panel,borderTop:'1px solid rgba(255,255,255,.07)',padding:'14px 14px 16px',flexShrink:0,animation:'slideUp .2s ease'}}>
-              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'12px'}}>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'6px'}}>
                 <span style={{fontSize:'14px',letterSpacing:'3px',color:T.dim}}>{L.showdown}</span>
                 <span style={{fontFamily:'monospace',fontSize:'22px',fontWeight:700,color:T.gold}}>{fmt(gs.pot)} {L.inPot}</span>
               </div>
-              {(screen==='local-game'||isHost)?(
+              {/* Contributions individuelles */}
+              {gs.handBets&&Object.keys(gs.handBets).length>0&&(
+                <div style={{display:'flex',flexWrap:'wrap',gap:'4px',marginBottom:'10px'}}>
+                  {gs.players.filter(p=>!p.folded&&(gs.handBets[p.id]||0)>0).sort((a,b)=>(gs.handBets[b.id]||0)-(gs.handBets[a.id]||0)).map(p=>(
+                    <div key={p.id} style={{display:'flex',alignItems:'center',gap:'4px',padding:'3px 7px',background:'rgba(255,255,255,.06)',borderRadius:'6px',fontSize:'12px'}}>
+                      <div style={{width:'7px',height:'7px',borderRadius:'50%',background:p.color}}/>
+                      <span style={{color:T.dim,textTransform:'uppercase',letterSpacing:'.5px'}}>{p.name.slice(0,6)}</span>
+                      <span style={{fontFamily:'monospace',color:T.gold,fontWeight:700}}>{fmt(gs.handBets[p.id]||0)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {(screen==='local-game'||isHost)&&sidePots?(()=>{
+                // Résolution séquentielle : 1 pot à la fois
+                const pidx=gs.sidePotIdx||0;
+                const sp=sidePots[pidx];
+                // Si tous les pots ont été résolus mais il reste des chips
+                if(!sp){
+                  if(gs.pot>0){
+                    // Pot non distribué → montrer TOUS les joueurs actifs
+                    const remaining=gs.players.filter(p=>!p.folded);
+                    return(
+                      <div>
+                        <div style={{fontSize:'11px',letterSpacing:'2px',color:T.dim,marginBottom:'8px',display:'flex',justifyContent:'space-between'}}>
+                          <span>POT PRINCIPAL</span>
+                          <span style={{color:T.gold,fontFamily:'monospace',fontSize:'18px',fontWeight:700}}>{fmt(gs.pot)}</span>
+                        </div>
+                        <div style={{display:'grid',gridTemplateColumns:`repeat(${Math.min(remaining.length,4)},1fr)`,gap:'8px'}}>
+                          {remaining.map(p=>(
+                            <button key={p.id} onClick={()=>handleWinAll(p.id)}
+                              style={{padding:'12px 4px',background:`rgba(212,175,55,.1)`,border:`1px solid ${T.gold}44`,borderRadius:'10px',color:T.gold,fontFamily:'inherit',fontSize:'14px',fontWeight:700,cursor:'pointer'}}>
+                              <div style={{display:'flex',alignItems:'center',gap:'4px',justifyContent:'center',marginBottom:'2px'}}>
+                                <div style={{width:'8px',height:'8px',borderRadius:'50%',background:p.color}}/>
+                                <span style={{textTransform:'uppercase',fontSize:'12px'}}>{p.name}</span>
+                              </div>🏆
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  }
+                  return null;
+                }
+                const eligible=gs.players.filter(p=>!p.folded&&sp.eligible.includes(p.id));
+                const totalPots=sidePots.length;
+                const autoWin=eligible.length===1;
+                return(
+                  <div>
+                    {/* Indicateur de progression si > 1 side pot */}
+                    {totalPots>1&&(
+                      <div style={{display:'flex',alignItems:'center',gap:'6px',marginBottom:'10px'}}>
+                        {sidePots.map((_,i)=>(
+                          <div key={i} style={{flex:1,height:'3px',borderRadius:'2px',
+                            background:i<pidx?T.gold:i===pidx?T.gold:'rgba(255,255,255,.15)',
+                            opacity:i<pidx?0.4:1}}/>
+                        ))}
+                        <span style={{fontSize:'11px',color:T.dim,whiteSpace:'nowrap'}}>{pidx+1}/{totalPots}</span>
+                      </div>
+                    )}
+                    {/* Label du pot courant */}
+                    <div style={{fontSize:'11px',letterSpacing:'2px',color:T.dim,marginBottom:'8px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                      <span>{pidx===0?'POT PRINCIPAL':`SIDE POT ${pidx}`}</span>
+                      <span style={{color:T.gold,fontFamily:'monospace',fontSize:'18px',fontWeight:700}}>{fmt(sp.amount)}</span>
+                    </div>
+                    {autoWin?(
+                      /* Pot non couvert : retourner automatiquement */
+                      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 12px',background:'rgba(255,255,255,.04)',borderRadius:'10px',marginBottom:'8px'}}>
+                        <div style={{display:'flex',alignItems:'center',gap:'6px'}}>
+                          <div style={{width:'8px',height:'8px',borderRadius:'50%',background:eligible[0]?.color}}/>
+                          <span style={{fontSize:'13px',color:T.dim}}>
+                            Non couvert — <span style={{color:T.cream,textTransform:'uppercase'}}>{eligible[0]?.name}</span>
+                          </span>
+                        </div>
+                        <button onClick={()=>handleWinPot(eligible[0].id,sp.amount,pidx+1)}
+                          style={{padding:'6px 14px',background:`rgba(212,175,55,.12)`,border:`1px solid ${T.gold}44`,borderRadius:'8px',color:T.gold,fontFamily:'inherit',fontSize:'14px',fontWeight:700,cursor:'pointer'}}>
+                          ↩ +{fmt(sp.amount)}
+                        </button>
+                      </div>
+                    ):(
+                      /* Sélectionner le gagnant */
+                      <div style={{display:'grid',gridTemplateColumns:`repeat(${Math.min(eligible.length,4)},1fr)`,gap:'8px',marginBottom:'8px'}}>
+                        {eligible.map(p=>(
+                          <div key={p.id} style={{display:'flex',flexDirection:'column',gap:'3px'}}>
+                            {/* Bouton principal : gagne toute la main */}
+                            <button onClick={()=>handleWinAll(p.id)}
+                              style={{padding:'10px 4px',background:`rgba(212,175,55,.18)`,border:`2px solid ${T.gold}88`,borderRadius:'10px',color:T.gold,fontFamily:'inherit',fontSize:'13px',fontWeight:800,cursor:'pointer',transition:'background .15s'}}
+                              onTouchStart={e=>e.currentTarget.style.background='rgba(212,175,55,.35)'}
+                              onTouchEnd={e=>e.currentTarget.style.background='rgba(212,175,55,.18)'}>
+                              <div style={{display:'flex',alignItems:'center',gap:'4px',justifyContent:'center',marginBottom:'2px'}}>
+                                <div style={{width:'8px',height:'8px',borderRadius:'50%',background:p.color}}/>
+                                <span style={{fontSize:'12px',maxWidth:'55px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',textTransform:'uppercase'}}>{p.name}</span>
+                              </div>
+                              🏆 MAIN
+                            </button>
+                            {/* Bouton secondaire : ce pot uniquement */}
+                            <button onClick={()=>handleWinPot(p.id,sp.amount,pidx+1)}
+                              style={{padding:'3px 2px',background:'transparent',border:'1px solid rgba(255,255,255,.1)',borderRadius:'6px',color:'rgba(255,255,255,.3)',fontFamily:'inherit',fontSize:'9px',fontWeight:600,cursor:'pointer',letterSpacing:'.5px'}}
+                              title="Ce pot uniquement">
+                              ce pot seul
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })():(screen==='local-game'||isHost)?(
                 <div style={{display:'grid',gridTemplateColumns:`repeat(${Math.min(active.length,4)},1fr)`,gap:'8px',marginBottom:'10px'}}>
                   {active.map(p=>(
                     <button key={p.id} onClick={()=>handleWin(p.id)} style={{padding:'12px 4px',background:`rgba(212,175,55,.12)`,border:`1px solid ${T.gold}44`,borderRadius:'12px',color:T.gold,fontFamily:'inherit',fontSize:'16px',fontWeight:700,cursor:'pointer'}}>
@@ -1464,8 +1764,13 @@ function App(){
                   En attente de la decision de l'hote...
                 </div>
               )}
-              {(screen==='local-game'||isHost)&&(
+              {(screen==='local-game'||isHost)&&gs.pot===0&&(
                 <button onClick={handleNextHand} style={{width:'100%',padding:'13px 4px',background:`rgba(212,175,55,.1)`,border:`1px solid ${T.gold}44`,borderRadius:'12px',color:T.gold,fontFamily:'inherit',fontSize:'16px',fontWeight:700,letterSpacing:'1px',cursor:'pointer'}}>{L.nextHand}</button>
+              )}
+              {gs.pot>0&&!sidePots&&(screen==='local-game'||isHost)&&(
+                <div style={{fontSize:'13px',color:T.red,textAlign:'center',padding:'4px 0',letterSpacing:'1px'}}>
+                  ⚠ Désignez d'abord le gagnant
+                </div>
               )}
               {hasUndo&&<button className="btn-undo" style={{marginTop:'6px',width:'100%'}} onClick={doUndo}>{L.undo}</button>}
             </div>
