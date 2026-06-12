@@ -643,6 +643,22 @@ function App(){
   const[showHands,setShowHands]=useState(false);
   const[streetBanner,setStreetBanner]=useState('');
   const[confirmQuit,setConfirmQuit]=useState(false);
+  // ── TOURNAMENT STATE ────────────────────────────────────────────
+  const[tCode,setTCode]=useState('');
+  const[tName,setTName]=useState('Mon Tournoi');
+  const[tSStack,setTSStack]=useState(1000);
+  const[tBMins,setTBMins]=useState(15);
+  const[tTables,setTTables]=useState([]); // [{id,name,subCode,players:[{id,name}]}]
+  const[tWaiting,setTWaiting]=useState([]); // joueurs non encore assignés
+  const[tSelPid,setTSelPid]=useState(null); // joueur sélectionné pour assignation
+  const[isTD,setIsTD]=useState(false);
+  const[tMyTable,setTMyTable]=useState(null); // {tableId,subCode,isHost}
+  const[tPauseAll,setTPauseAll]=useState(false);
+  const[tPendingXfer,setTPendingXfer]=useState(null); // {toSubCode,toName} à exécuter après la main
+  const[tTableStatus,setTTableStatus]=useState({}); // {subCode:{players,handNum,done}}
+  const[tNumTables,setTNumTables]=useState(2);
+  const tChanRef2=useRef(null); // canal tournoi (séparé du canal table)
+  const tAblyRef2=useRef(null);
   const[soundOn,setSoundOn]=useState(!SFX.muted); // ex: '🃏 FLOP'
   const[tableTheme,setTableTheme]=useState(()=>localStorage.getItem('vpc_theme')||'black');
 
@@ -728,13 +744,180 @@ function App(){
     }
   }
   function quitGame(){
-    // Nettoyage Ably
     if(joinIntervalRef.current){clearInterval(joinIntervalRef.current);joinIntervalRef.current=null;}
     if(ablyRef.current){try{ablyRef.current.close();}catch(e){}}
     ablyRef.current=null; chanRef.current=null;
     localStorage.removeItem('vpc_screen');
     setGs(null); setScreen('landing'); setIsHost(false);
     setRoomCode(''); setLobbyPlayers([]); setConnMsg('');
+  }
+
+  // ── TOURNAMENT FUNCTIONS ──────────────────────────────────────
+  function genTCode(){return Array.from({length:4},()=>'ABCDEFGHJKLMNPQRSTUVWXYZ'[Math.floor(Math.random()*23)]).join('');}
+
+  function initTournamentAsTD(){
+    const code=genTCode();
+    // Naviguer d'abord pour éviter blocage si Ably échoue
+    setTCode(code);
+    setIsTD(true);
+    setTTables([
+      {id:'T1',name:'Table 1',subCode:code+'1',players:[]},
+      {id:'T2',name:'Table 2',subCode:code+'2',players:[]},
+    ]);
+    setScreen('t-host-lobby');
+
+    if(ABLY_KEY==='YOUR_ABLY_API_KEY'){
+      setConnMsg('⚠ Configurez votre clé Ably pour activer le multijoueur');
+      return;
+    }
+    try{
+      const ab=new Ably.Realtime({key:ABLY_KEY,clientId:myId.current});
+      tAblyRef2.current=ab;
+      const ch=ab.channels.get(`vpct-${code}`);
+      tChanRef2.current=ch;
+      ch.subscribe('t-join',(msg)=>{
+        setTWaiting(prev=>[...prev.filter(p=>p.id!==msg.data.id),{id:msg.data.id,name:msg.data.name}]);
+      });
+      ch.subscribe('t-stack-report',(msg)=>{
+        setTTableStatus(prev=>({...prev,[msg.data.subCode]:{players:msg.data.players,handNum:msg.data.handNum,done:false}}));
+      });
+      ch.subscribe('t-table-done',(msg)=>{
+        setTTableStatus(prev=>({...prev,[msg.data.subCode]:{...prev[msg.data.subCode],done:true,winner:msg.data.winner}}));
+      });
+    }catch(e){
+      console.error('Ably tournament error:',e);
+      setConnMsg('⚠ Erreur Ably: '+e.message);
+    }
+  }
+
+  function joinTournamentChannel(code){
+    if(!code||code.length!==4)return;
+    setTCode(code); setIsTD(false);
+    setScreen('t-player-wait'); // Naviguer d'abord
+    if(ABLY_KEY==='YOUR_ABLY_API_KEY'){setConnMsg('Clé Ably manquante');return;}
+    try{
+    const ab=new Ably.Realtime({key:ABLY_KEY,clientId:myId.current});
+    tAblyRef2.current=ab;
+    const ch=ab.channels.get(`vpct-${code}`);
+    tChanRef2.current=ch;
+    // Annoncer sa présence
+    ch.publish('t-join',{id:myId.current,name:nameInput||'Joueur'});
+    // Écouter l'assignation
+    ch.subscribe('t-assign',(msg)=>{
+      if(msg.data.pid!==myId.current)return;
+      setTMyTable({tableId:msg.data.tableId,subCode:msg.data.subCode,isHost:msg.data.isHost,tableName:msg.data.tableName});
+    });
+    // Écouter le lancement
+    ch.subscribe('t-start-all',(msg)=>{
+      const assign=msg.data.assigns.find(a=>a.pid===myId.current);
+      if(!assign)return;
+      setTMyTable(prev=>({...prev,isHost:assign.isHost}));
+      setStartChips(msg.data.startStack);
+      setBlindMins(msg.data.blindMins);
+      setRoomCode(assign.subCode);
+      if(assign.isHost){
+        // Lancer comme host de table
+        const lp=[...msg.data.assigns.filter(a=>a.subCode===assign.subCode).map(a=>({id:a.pid,name:a.name}))];
+        setLobbyPlayers(lp);
+        setIsHost(true);
+        setScreen('online-game');
+        setNumP(lp.length);
+        // Lancer la partie
+        setTimeout(()=>doLaunchOnline(msg.data.startStack,msg.data.blindMins,lp),300);
+      } else {
+        setScreen('online-game');
+        setConnMsg('');
+        // Rejoindre comme guest — initAbly le fait
+        setTimeout(()=>initAblyAsGuest(assign.subCode),300);
+      }
+    });
+    // Pause globale
+    ch.subscribe('t-pause',()=>{setPaused(true);setTPauseAll(true);});
+    ch.subscribe('t-resume',()=>{setPaused(false);setTPauseAll(false);});
+    // Transfert — notification
+    ch.subscribe('t-xfer-notify',(msg)=>{
+      if(msg.data.pid!==myId.current)return;
+      setTPendingXfer({toSubCode:msg.data.toSubCode,toName:msg.data.toName});
+    });
+    // Transfert — exécution (après la main)
+    ch.subscribe('t-xfer-go',(msg)=>{
+      if(msg.data.pid!==myId.current)return;
+      // Quitter table actuelle et rejoindre nouvelle
+      if(ablyRef.current){try{ablyRef.current.close();}catch(e){}}
+      ablyRef.current=null; chanRef.current=null;
+      setGs(null); setScreen('t-player-wait');
+      setTMyTable(prev=>({...prev,subCode:msg.data.toSubCode,tableName:msg.data.toName,isHost:false}));
+      setTPendingXfer(null);
+      setTimeout(()=>initAblyAsGuest(msg.data.toSubCode),400);
+    });
+    }catch(e){console.error('Ably join error:',e);setConnMsg('Erreur: '+e.message);}
+  }
+
+  function doLaunchOnline(stack,bmins,players){
+    const ps=players.map((lp,i)=>({id:lp.id,name:lp.name,stack,color:SEAT_COLORS[i%SEAT_COLORS.length],folded:false}));
+    const initGs=makeInitGs(ps,startBlind,stack);
+    setGs(initGs); setTimer(bmins*60);
+    if(chanRef.current) chanRef.current.publish('start',{gs:initGs,blindMins:bmins});
+    setTab('game');
+  }
+
+  function initAblyAsGuest(subCode){
+    if(ABLY_KEY==='YOUR_ABLY_API_KEY'){setConnMsg('Clé Ably manquante');return;}
+    const ab=new Ably.Realtime({key:ABLY_KEY,clientId:myId.current});
+    ablyRef.current=ab;
+    const ch=ab.channels.get(`vpc-${subCode}`);
+    chanRef.current=ch;
+    ch.subscribe('state',(msg)=>{if(msg.data.gs){setGs(msg.data.gs);if(msg.data.timer)setTimer(msg.data.timer);}});
+    ch.subscribe('lobby',(msg)=>{if(joinIntervalRef.current){clearInterval(joinIntervalRef.current);joinIntervalRef.current=null;}});
+    ch.subscribe('start',(msg)=>{if(joinIntervalRef.current){clearInterval(joinIntervalRef.current);joinIntervalRef.current=null;}setGs(msg.data.gs);setTimer(msg.data.blindMins*60);setScreen('online-game');});
+    const jp={id:myId.current,name:nameInput||'Joueur'};
+    ch.publish('join',jp);
+    joinIntervalRef.current=setInterval(()=>ch.publish('join',jp),1500);
+  }
+
+  function tdAssignPlayer(pid,tableId){
+    const allP=[...tWaiting,...tTables.flatMap(t=>t.players)];
+    const player=allP.find(p=>p.id===pid);
+    if(!player)return;
+    const destTable=tableId?tTables.find(t=>t.id===tableId):null;
+    const willBeHost=destTable?destTable.players.filter(p=>p.id!==pid).length===0:false;
+    setTWaiting(prev=>{
+      const f=prev.filter(p=>p.id!==pid);
+      return tableId?f:[...f,{id:player.id,name:player.name}];
+    });
+    setTTables(prev=>prev.map(t=>{
+      const c=t.players.filter(p=>p.id!==pid);
+      return t.id===tableId?{...t,players:[...c,{id:player.id,name:player.name}]}:{...t,players:c};
+    }));
+    setTSelPid(null);
+    if(tChanRef2.current&&tableId&&destTable){
+      tChanRef2.current.publish('t-assign',{pid:player.id,tableId,subCode:destTable.subCode,tableName:destTable.name,isHost:willBeHost});
+    }
+  }
+
+  function tdLaunchTournament(){
+    if(!tChanRef2.current)return;
+    // Construire la liste complète des assignments
+    const assigns=[];
+    tTables.forEach(tbl=>{
+      tbl.players.forEach((p,i)=>assigns.push({pid:p.id,name:p.name,subCode:tbl.subCode,tableId:tbl.id,isHost:i===0}));
+    });
+    tChanRef2.current.publish('t-start-all',{assigns,startStack:tSStack,blindMins:tBMins});
+    setScreen('t-host-manage');
+  }
+
+  function tdPauseAll(pause){
+    if(!tChanRef2.current)return;
+    tChanRef2.current.publish(pause?'t-pause':'t-resume',{});
+    setTPauseAll(pause);
+  }
+
+  function tdInitiateTransfer(pid,fromSubCode,toSubCode){
+    const toTable=tTables.find(t=>t.subCode===toSubCode);
+    if(!tChanRef2.current||!toTable)return;
+    tChanRef2.current.publish('t-xfer-notify',{pid,toSubCode,toName:toTable.name});
+    // Marquer le transfert comme en attente dans le status de table
+    setTTableStatus(prev=>({...prev,[fromSubCode]:{...prev[fromSubCode],pendingXfer:{pid,toSubCode,toName:toTable.name}}}));
   }
   function doNotif(msg){setNotif(msg);setTimeout(()=>setNotif(''),2400);}
 
@@ -995,8 +1178,11 @@ function App(){
       const goNext={...next,phase:'gameover'};
       setGs(goNext);
       checkHandEnd(goNext);
+      if(tMyTable&&isHost) reportTournamentStacks(goNext);
       return;
     }
+    // Reporter les stacks au DT si mode tournoi
+    if(tMyTable&&isHost) reportTournamentStacks(next);
     if(eliminated.length)setTimeout(()=>doNotif(L.nElim(eliminated.join(', '))),80);
   }
 
@@ -1177,6 +1363,16 @@ function App(){
             Si l'app vous plaît, donnez un coup de pouce pour qu'elle continue à exister. Merci !
           </div>
         </div>
+        {/* ── BOUTON TOURNOI ── */}
+        <div style={{borderRadius:'14px',border:'1px solid rgba(212,175,55,.3)',background:'rgba(212,175,55,.06)',padding:'16px 18px',cursor:'pointer',display:'flex',alignItems:'center',gap:'14px'}}
+          onClick={()=>setScreen('t-join-or-create')}>
+          <span style={{fontSize:'28px'}}>🏆</span>
+          <div>
+            <div style={{fontSize:'18px',fontWeight:800,color:T.gold,letterSpacing:'2px'}}>TOURNOI</div>
+            <div style={{fontSize:'13px',color:T.dim,marginTop:'2px'}}>Créer ou rejoindre un tournoi</div>
+          </div>
+        </div>
+
         {[{label:L.local,icon:'📱',desc:'1 téléphone · tour par tour',onClick:()=>setScreen('local-setup')},
           {label:L.host,icon:'🌐',desc:'Créer une partie en ligne',onClick:()=>setScreen('host-setup')},
           {label:L.join,icon:'🎯',desc:'Rejoindre avec un code',onClick:()=>setScreen('join')},
@@ -1364,11 +1560,23 @@ function App(){
           {/* 📖 Hands reference */}
           <button onClick={()=>setShowHands(h=>!h)} style={{background:showHands?'rgba(212,175,55,.18)':'transparent',border:`1px solid ${showHands?T.gold:'rgba(255,255,255,.14)'}`,color:showHands?T.gold:T.dim,padding:'6px 9px',borderRadius:'7px',cursor:'pointer',fontSize:'18px',lineHeight:1}}>📖</button>
           <button onClick={()=>{if(gs)setRenameModal({idx:0,name:gs.players[0]?.name||''}); }} style={{background:'transparent',border:'1px solid rgba(255,255,255,.14)',color:T.dim,padding:'6px 9px',borderRadius:'7px',cursor:'pointer',fontSize:'13px',fontFamily:'inherit',letterSpacing:'1px'}}>{L.editNames}</button>
+          {tMyTable&&(
+            <div style={{background:'rgba(212,175,55,.1)',border:'1px solid rgba(212,175,55,.2)',borderRadius:'7px',padding:'4px 8px',fontSize:'11px',color:T.gold,letterSpacing:'1px',fontWeight:700}}>
+              🏆 {tMyTable.tableName}
+            </div>
+          )}
           <button onClick={()=>setScreen('landing')} style={{background:'transparent',border:'1px solid rgba(255,255,255,.14)',color:T.dim,padding:'6px 9px',borderRadius:'7px',cursor:'pointer',fontSize:'16px',fontFamily:'inherit'}}>⚙</button>
           <button onClick={()=>{const m=SFX.toggle();setSoundOn(!m);}} style={{background:'transparent',border:'1px solid rgba(255,255,255,.14)',color:soundOn?T.gold:T.dim,padding:'6px 9px',borderRadius:'7px',cursor:'pointer',fontSize:'16px'}}>{soundOn?'🔊':'🔇'}</button>
           <button onClick={()=>setConfirmQuit(true)} style={{background:'rgba(229,57,53,.1)',border:'1px solid rgba(229,57,53,.3)',color:'#ef5350',padding:'6px 9px',borderRadius:'7px',cursor:'pointer',fontSize:'12px',fontFamily:'inherit',fontWeight:700,letterSpacing:'1px'}}>✕</button>
         </div>
       </div>
+
+      {/* Notification transfert en attente */}
+      {tPendingXfer&&(
+        <div style={{position:'absolute',bottom:'calc(100% + 8px)',left:'50%',transform:'translateX(-50%)',background:'rgba(212,175,55,.9)',borderRadius:'10px',padding:'6px 16px',fontSize:'13px',fontWeight:700,color:T.bg,whiteSpace:'nowrap',zIndex:50,boxShadow:'0 4px 16px rgba(0,0,0,.4)'}}>
+          ⚡ Transfert → {tPendingXfer.toName} après cette main
+        </div>
+      )}
 
       {/* Street banner */}
       {streetBanner&&(
@@ -1775,6 +1983,219 @@ function App(){
               {hasUndo&&<button className="btn-undo" style={{marginTop:'6px',width:'100%'}} onClick={doUndo}>{L.undo}</button>}
             </div>
           )}
+    </div>
+  );
+
+
+  // ══════════════════════════════════════════════════════════════
+  // SCREEN: t-join-or-create
+  // ══════════════════════════════════════════════════════════════
+  if(screen==='t-join-or-create')return(
+    <div style={{height:'100vh',background:T.bg,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'24px',gap:'16px'}}>
+      <div style={{fontSize:'36px',marginBottom:'4px'}}>🏆</div>
+      <div style={{fontSize:'28px',fontWeight:800,color:T.gold,letterSpacing:'3px',marginBottom:'16px'}}>TOURNOI</div>
+      <button onClick={initTournamentAsTD} style={{width:'100%',maxWidth:'340px',padding:'18px',background:`linear-gradient(135deg,${T.gold},#b08a20)`,border:'none',borderRadius:'14px',color:T.bg,fontFamily:"'Barlow Condensed',sans-serif",fontSize:'20px',fontWeight:800,letterSpacing:'2px',cursor:'pointer'}}>
+        🎯 Créer un tournoi
+      </button>
+      <div style={{width:'100%',maxWidth:'340px'}}>
+        <input value={codeInput} onChange={e=>setCodeInput(e.target.value.toUpperCase().slice(0,4))} placeholder="CODE" style={{width:'100%',padding:'14px',background:'rgba(255,255,255,.07)',border:'1px solid rgba(255,255,255,.2)',borderRadius:'10px',color:T.text,fontFamily:'monospace',fontSize:'28px',letterSpacing:'12px',textAlign:'center',outline:'none',marginBottom:'8px'}}/>
+        <input value={nameInput} onChange={e=>setNameInput(e.target.value)} placeholder="Votre nom" style={{width:'100%',padding:'14px',background:'rgba(255,255,255,.07)',border:'1px solid rgba(255,255,255,.14)',borderRadius:'10px',color:T.text,fontFamily:"'Barlow Condensed',sans-serif",fontSize:'18px',outline:'none',marginBottom:'8px'}}/>
+        <button onClick={()=>{if(codeInput.length===4)joinTournamentChannel(codeInput);}} style={{width:'100%',padding:'16px',background:'rgba(255,255,255,.07)',border:'1px solid rgba(255,255,255,.18)',borderRadius:'12px',color:T.text,fontFamily:"'Barlow Condensed',sans-serif",fontSize:'18px',fontWeight:700,cursor:'pointer',letterSpacing:'1px'}}>
+          🎟 Rejoindre avec un code
+        </button>
+      </div>
+      <button onClick={()=>setScreen('landing')} style={{marginTop:'8px',background:'transparent',border:'none',color:T.dim,fontFamily:"'Barlow Condensed',sans-serif",fontSize:'14px',cursor:'pointer',letterSpacing:'1px'}}>← Retour</button>
+    </div>
+  );
+
+  // ══════════════════════════════════════════════════════════════
+  // SCREEN: t-host-lobby — DT assigne les joueurs aux tables
+  // ══════════════════════════════════════════════════════════════
+  if(screen==='t-host-lobby')return(
+    <div style={{height:'100vh',background:T.bg,display:'flex',flexDirection:'column',fontFamily:"'Barlow Condensed',sans-serif",overflow:'hidden'}}>
+      {/* Header */}
+      <div style={{padding:'10px 14px',background:'rgba(0,0,0,.3)',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
+        <div>
+          <span style={{fontSize:'16px',fontWeight:700,color:T.gold,letterSpacing:'2px'}}>🏆 {tName}</span>
+          <span style={{marginLeft:'12px',fontSize:'12px',color:T.dim,fontFamily:'monospace'}}>Code: <b style={{color:T.cream}}>{tCode}</b></span>
+        </div>
+        <div style={{display:'flex',gap:'8px',alignItems:'center'}}>
+          <span style={{fontSize:'12px',color:tWaiting.length>0?'#4caf50':T.dim}}>{tWaiting.length+tTables.reduce((s,t)=>s+t.players.length,0)} connectés</span>
+          <button onClick={()=>setScreen('landing')} style={{background:'rgba(229,57,53,.1)',border:'1px solid rgba(229,57,53,.3)',color:'#ef5350',padding:'5px 9px',borderRadius:'7px',cursor:'pointer',fontSize:'12px',fontWeight:700}}>✕</button>
+        </div>
+      </div>
+
+      {/* Main layout */}
+      <div style={{flex:1,display:'flex',gap:'0',overflow:'hidden'}}>
+
+        {/* Left: waiting players */}
+        <div style={{width:'140px',flexShrink:0,borderRight:'1px solid rgba(255,255,255,.08)',padding:'10px 8px',overflowY:'auto'}}>
+          <div style={{fontSize:'11px',letterSpacing:'2px',color:T.dim,marginBottom:'8px'}}>EN ATTENTE</div>
+          {tWaiting.length===0&&<div style={{fontSize:'12px',color:'rgba(255,255,255,.2)',textAlign:'center',marginTop:'20px'}}>Aucun joueur<br/>en attente</div>}
+          {tWaiting.map(p=>(
+            <div key={p.id} onClick={()=>setTSelPid(tSelPid===p.id?null:p.id)}
+              style={{padding:'8px 10px',borderRadius:'8px',marginBottom:'6px',cursor:'pointer',
+                background:tSelPid===p.id?`rgba(212,175,55,.2)`:'rgba(255,255,255,.05)',
+                border:tSelPid===p.id?`1px solid ${T.gold}`:'1px solid rgba(255,255,255,.08)',
+                fontSize:'14px',fontWeight:700,color:tSelPid===p.id?T.gold:T.text,textTransform:'uppercase'}}>
+              {p.name.slice(0,8)}
+            </div>
+          ))}
+        </div>
+
+        {/* Right: tables */}
+        <div style={{flex:1,padding:'10px',overflowY:'auto'}}>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:'10px',marginBottom:'10px'}}>
+            {tTables.map(tbl=>(
+              <div key={tbl.id} onClick={()=>{if(tSelPid)tdAssignPlayer(tSelPid,tbl.id);}}
+                style={{borderRadius:'12px',padding:'10px',minHeight:'120px',cursor:tSelPid?'pointer':'default',
+                  background:tSelPid?'rgba(212,175,55,.08)':'rgba(255,255,255,.04)',
+                  border:tSelPid?`2px dashed ${T.gold}88`:'1px solid rgba(255,255,255,.1)',
+                  transition:'all .15s'}}>
+                <div style={{display:'flex',justifyContent:'space-between',marginBottom:'8px'}}>
+                  <span style={{fontSize:'13px',fontWeight:700,color:T.gold,letterSpacing:'1px'}}>{tbl.name}</span>
+                  <span style={{fontSize:'11px',color:T.dim}}>{tbl.players.length}/9</span>
+                </div>
+                {tbl.players.map((p,i)=>(
+                  <div key={p.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'4px 0',borderBottom:'1px solid rgba(255,255,255,.05)'}}>
+                    <span style={{fontSize:'12px',color:i===0?T.gold:T.text,textTransform:'uppercase'}}>{i===0?'👑 ':''}{p.name.slice(0,8)}</span>
+                    <button onClick={(e)=>{e.stopPropagation();tdAssignPlayer(p.id,null);}}
+                      style={{background:'transparent',border:'none',color:'rgba(255,100,100,.5)',fontSize:'14px',cursor:'pointer',lineHeight:1,padding:'0 2px'}}>×</button>
+                  </div>
+                ))}
+                {tSelPid&&<div style={{textAlign:'center',marginTop:'8px',fontSize:'11px',color:`${T.gold}88`}}>← Placer ici</div>}
+              </div>
+            ))}
+          </div>
+          <button onClick={()=>{
+            const n=tTables.length+1;
+            setTTables(prev=>[...prev,{id:'T'+n,name:'Table '+n,subCode:tCode+n,players:[]}]);
+          }} style={{padding:'8px 16px',background:'transparent',border:'1px dashed rgba(255,255,255,.2)',borderRadius:'10px',color:T.dim,fontFamily:'inherit',fontSize:'13px',cursor:'pointer'}}>
+            + Ajouter une table
+          </button>
+        </div>
+      </div>
+
+      {/* Footer: config + launch */}
+      <div style={{padding:'10px 14px',background:'rgba(0,0,0,.3)',borderTop:'1px solid rgba(255,255,255,.07)',flexShrink:0}}>
+        <div style={{display:'flex',gap:'10px',alignItems:'center',marginBottom:'10px',flexWrap:'wrap'}}>
+          <label style={{fontSize:'12px',color:T.dim}}>Stack</label>
+          <input type="number" value={tSStack} onChange={e=>setTSStack(+e.target.value)} style={{width:'80px',padding:'6px',background:'rgba(255,255,255,.07)',border:'1px solid rgba(255,255,255,.14)',borderRadius:'7px',color:T.text,fontFamily:'monospace',fontSize:'14px',outline:'none'}}/>
+          <label style={{fontSize:'12px',color:T.dim}}>Blind (min)</label>
+          <input type="number" value={tBMins} onChange={e=>setTBMins(+e.target.value)} style={{width:'60px',padding:'6px',background:'rgba(255,255,255,.07)',border:'1px solid rgba(255,255,255,.14)',borderRadius:'7px',color:T.text,fontFamily:'monospace',fontSize:'14px',outline:'none'}}/>
+        </div>
+        {(()=>{
+          const tablesReady=tTables.filter(t=>t.players.length>=2);
+          const totalAssigned=tTables.reduce((s,t)=>s+t.players.length,0);
+          const canLaunch=tablesReady.length>0&&tWaiting.length===0;
+          return(
+            <button onClick={tdLaunchTournament} disabled={!canLaunch}
+              style={{width:'100%',padding:'14px',background:canLaunch?`linear-gradient(135deg,${T.gold},#b08a20)`:'rgba(255,255,255,.05)',border:'none',borderRadius:'12px',color:canLaunch?T.bg:T.dim,fontFamily:"'Barlow Condensed',sans-serif",fontSize:'18px',fontWeight:800,letterSpacing:'2px',cursor:canLaunch?'pointer':'not-allowed'}}>
+              {canLaunch?`🚀 LANCER (${tablesReady.length} table${tablesReady.length>1?'s':''}  ·  ${totalAssigned} joueurs)`:`⏳ ${tWaiting.length} joueur${tWaiting.length>1?'s':''} à placer`}
+            </button>
+          );
+        })()}
+      </div>
+    </div>
+  );
+
+  // ══════════════════════════════════════════════════════════════
+  // SCREEN: t-player-wait — Joueur attend son assignation
+  // ══════════════════════════════════════════════════════════════
+  if(screen==='t-player-wait')return(
+    <div style={{height:'100vh',background:T.bg,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'24px',gap:'20px',fontFamily:"'Barlow Condensed',sans-serif",textAlign:'center'}}>
+      <div style={{fontSize:'48px'}}>{tMyTable?'🎯':'⏳'}</div>
+      <div style={{fontSize:'26px',fontWeight:800,color:T.gold,letterSpacing:'2px'}}>TOURNOI</div>
+      {tMyTable?(
+        <>
+          <div style={{fontSize:'20px',color:T.cream}}>Vous serez à</div>
+          <div style={{fontSize:'32px',fontWeight:800,color:T.gold,letterSpacing:'2px'}}>{tMyTable.tableName}</div>
+          {tMyTable.isHost&&<div style={{fontSize:'14px',color:'#4caf50',letterSpacing:'1px'}}>Vous êtes l'hôte de cette table</div>}
+          <div style={{fontSize:'14px',color:T.dim,animation:'pulse 1.5s ease infinite'}}>En attente du lancement...</div>
+        </>
+      ):(
+        <>
+          <div style={{fontSize:'20px',color:T.text}}>Connecté : <b style={{color:T.cream}}>{nameInput||'Joueur'}</b></div>
+          <div style={{fontSize:'15px',color:T.dim,animation:'pulse 1.5s ease infinite'}}>Le DT vous assigne une table...</div>
+        </>
+      )}
+    </div>
+  );
+
+  // ══════════════════════════════════════════════════════════════
+  // SCREEN: t-host-manage — DT gère le tournoi en cours
+  // ══════════════════════════════════════════════════════════════
+  if(screen==='t-host-manage')return(
+    <div style={{height:'100vh',background:T.bg,display:'flex',flexDirection:'column',fontFamily:"'Barlow Condensed',sans-serif",overflow:'hidden'}}>
+      {/* Header */}
+      <div style={{padding:'10px 14px',background:'rgba(0,0,0,.3)',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
+        <div>
+          <span style={{fontSize:'16px',fontWeight:800,color:T.gold,letterSpacing:'2px'}}>🏆 {tName}</span>
+          <span style={{marginLeft:'10px',fontSize:'12px',color:T.dim,fontFamily:'monospace'}}>Code: <b style={{color:T.cream}}>{tCode}</b></span>
+        </div>
+        <button onClick={()=>tdPauseAll(!tPauseAll)}
+          style={{padding:'8px 14px',background:tPauseAll?'rgba(76,175,80,.2)':'rgba(229,57,53,.1)',border:tPauseAll?'1px solid #4caf50':'1px solid rgba(229,57,53,.3)',borderRadius:'8px',color:tPauseAll?'#4caf50':'#ef5350',fontFamily:'inherit',fontSize:'14px',fontWeight:700,cursor:'pointer',letterSpacing:'1px'}}>
+          {tPauseAll?'▶ REPRENDRE':'⏸ PAUSE GLOBALE'}
+        </button>
+      </div>
+
+      {/* Tables grid */}
+      <div style={{flex:1,padding:'12px',overflowY:'auto'}}>
+        {tTables.map(tbl=>{
+          const status=tTableStatus[tbl.subCode];
+          const isDone=status?.done;
+          return(
+            <div key={tbl.id} style={{borderRadius:'12px',padding:'12px',marginBottom:'10px',
+              background:isDone?'rgba(76,175,80,.05)':'rgba(255,255,255,.04)',
+              border:`1px solid ${isDone?'rgba(76,175,80,.3)':'rgba(255,255,255,.1)'}`}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'8px'}}>
+                <div>
+                  <span style={{fontSize:'16px',fontWeight:700,color:isDone?'#4caf50':T.gold,letterSpacing:'1px'}}>{tbl.name}</span>
+                  {status?.handNum&&<span style={{marginLeft:'8px',fontSize:'12px',color:T.dim}}>Main #{status.handNum}</span>}
+                  {isDone&&<span style={{marginLeft:'8px',fontSize:'12px',color:'#4caf50'}}>✓ Terminée</span>}
+                </div>
+                {isDone&&status?.winner&&(
+                  <span style={{fontSize:'13px',color:'#4caf50',fontWeight:700}}>🏆 {status.winner.name} {status.winner.stack}</span>
+                )}
+              </div>
+              {/* Player stacks */}
+              {status?.players&&(
+                <div style={{display:'flex',flexWrap:'wrap',gap:'6px'}}>
+                  {status.players.map(p=>(
+                    <div key={p.id} style={{padding:'4px 8px',background:'rgba(255,255,255,.06)',borderRadius:'6px',fontSize:'12px',
+                      display:'flex',alignItems:'center',gap:'5px'}}>
+                      <span style={{color:T.text,textTransform:'uppercase'}}>{p.name.slice(0,6)}</span>
+                      <span style={{color:T.gold,fontFamily:'monospace',fontWeight:700}}>{typeof p.stack==='number'?fmt(p.stack):p.stack}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {!status?.players&&tbl.players.length>0&&(
+                <div style={{fontSize:'12px',color:T.dim}}>
+                  {tbl.players.map(p=>p.name).join(', ')} · En attente de données...
+                </div>
+              )}
+              {/* Transfer buttons */}
+              {!isDone&&status?.players&&tTables.filter(t=>t.id!==tbl.id&&!tTableStatus[t.subCode]?.done).length>0&&(
+                <div style={{marginTop:'8px',borderTop:'1px solid rgba(255,255,255,.06)',paddingTop:'8px'}}>
+                  <div style={{fontSize:'11px',color:T.dim,marginBottom:'4px',letterSpacing:'1px'}}>TRANSFÉRER →</div>
+                  <div style={{display:'flex',flexWrap:'wrap',gap:'4px'}}>
+                    {status.players.map(p=>(
+                      tTables.filter(t=>t.id!==tbl.id&&!tTableStatus[t.subCode]?.done).map(dest=>(
+                        <button key={p.id+'-'+dest.id}
+                          onClick={()=>tdInitiateTransfer(p.id,tbl.subCode,dest.subCode)}
+                          style={{padding:'4px 8px',background:'rgba(255,255,255,.06)',border:'1px solid rgba(255,255,255,.12)',borderRadius:'6px',color:T.dim,fontFamily:'inherit',fontSize:'11px',cursor:'pointer'}}>
+                          {p.name.slice(0,5)} → {dest.name}
+                        </button>
+                      ))
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 
