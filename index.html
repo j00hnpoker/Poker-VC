@@ -19,10 +19,10 @@
 const{useState,useEffect,useRef}=React;
 
 // ── CONFIG ────────────────────────────────────────────────────────────────
-const ABLY_KEY  ='tfGBNw.ZRKIUw:CeKry3BPPS-i7hBViYg5fpqh_uRSevvTqil7CwaLF1w';
-const SENTRY_DSN='https://b6833dfd8b71566b5009a22983b9542d@o4511455498141696.ingest.de.sentry.io/4511455526322256';
-const DONATE_URL = 'https://buymeacoffee.com/virtualpokerchips';
-const APP_URL = 'https://j00hnpoker.github.io/Poker-VC';
+const ABLY_KEY  ='YOUR_ABLY_API_KEY';
+const SENTRY_DSN='YOUR_SENTRY_DSN';
+const DONATE_URL='YOUR_DONATION_URL';
+const APP_URL   =window.location.origin+window.location.pathname;
 
 if(SENTRY_DSN!=='YOUR_SENTRY_DSN'&&typeof Sentry!=='undefined')
   Sentry.init({dsn:SENTRY_DSN,tracesSampleRate:0.2});
@@ -2219,32 +2219,41 @@ function App(){
                   {tbl.players.map(p=>p.name).join(', ')} · En attente de données...
                 </div>
               )}
-              {/* Transfer buttons */}
-              {!isDone&&status?.players&&tTables.filter(t=>t.id!==tbl.id&&!tTableStatus[t.subCode]?.done).length>0&&(
-                                <div style={{marginTop:'6px',display:'flex',flexWrap:'wrap',gap:'4px',alignItems:'center'}}>
-                  <span style={{fontSize:'10px',color:T.dim,letterSpacing:'1px',marginRight:'2px'}}>RECAVE →</span>
-                  {(status&&status.players||[]).map(p=>(
-                    <button key={'r'+p.id} onClick={()=>{
-                      const amt=prompt('Recave '+p.name+' — jetons à ajouter ?');
-                      if(amt&&!isNaN(parseInt(amt))) tdRecave(p.id,tbl.subCode,parseInt(amt));
-                    }} style={{padding:'3px 7px',background:'rgba(76,175,80,.1)',border:'1px solid rgba(76,175,80,.3)',borderRadius:'6px',color:'#4caf50',fontFamily:'inherit',fontSize:'11px',cursor:'pointer'}}>
-                      +{p.name.slice(0,6)}
-                    </button>
-                  ))}
-                </div>
-<div style={{marginTop:'8px',borderTop:'1px solid rgba(255,255,255,.06)',paddingTop:'8px'}}>
-                  <div style={{fontSize:'11px',color:T.dim,marginBottom:'4px',letterSpacing:'1px'}}>TRANSFÉRER →</div>
-                  <div style={{display:'flex',flexWrap:'wrap',gap:'4px'}}>
-                    {status.players.map(p=>(
-                      tTables.filter(t=>t.id!==tbl.id&&!tTableStatus[t.subCode]?.done).map(dest=>(
-                        <button key={p.id+'-'+dest.id}
-                          onClick={()=>tdInitiateTransfer(p.id,tbl.subCode,dest.subCode)}
-                          style={{padding:'4px 8px',background:'rgba(255,255,255,.06)',border:'1px solid rgba(255,255,255,.12)',borderRadius:'6px',color:T.dim,fontFamily:'inherit',fontSize:'11px',cursor:'pointer'}}>
-                          {p.name.slice(0,5)} → {dest.name}
-                        </button>
-                      ))
+              {/* Recave + Transfert */}
+              {!isDone&&status&&status.players&&(
+                <div style={{marginTop:'6px'}}>
+                  {/* Recave */}
+                  <div style={{display:'flex',flexWrap:'wrap',gap:'4px',alignItems:'center',marginBottom:'6px'}}>
+                    <span style={{fontSize:'10px',color:T.dim,letterSpacing:'1px',marginRight:'2px'}}>RECAVE →</span>
+                    {(status.players||[]).map(p=>(
+                      <button key={'r'+p.id} onClick={()=>{
+                        const a=prompt('Recave '+p.name+' — jetons ?');
+                        if(a&&!isNaN(+a))tdRecave(p.id,tbl.subCode,+a);
+                      }} style={{padding:'3px 7px',background:'rgba(76,175,80,.1)',border:'1px solid rgba(76,175,80,.3)',borderRadius:'6px',color:'#4caf50',fontFamily:'inherit',fontSize:'11px',cursor:'pointer'}}>
+                        +{p.name.slice(0,6)}
+                      </button>
                     ))}
                   </div>
+                  {/* Transfert */}
+                  {tTables.filter(t=>t.id!==tbl.id).length>0&&(
+                    <div style={{borderTop:'1px solid rgba(255,255,255,.06)',paddingTop:'6px'}}>
+                      <div style={{fontSize:'10px',color:T.dim,marginBottom:'4px',letterSpacing:'1px'}}>TRANSFÉRER →</div>
+                      <div style={{display:'flex',flexWrap:'wrap',gap:'4px'}}>
+                        {(()=>{
+                          const btns=[];
+                          (status.players||[]).forEach(p=>{
+                            tTables.filter(t=>t.id!==tbl.id).forEach(dest=>{
+                              btns.push(<button key={p.id+dest.id} onClick={()=>tdInitiateTransfer(p.id,tbl.subCode,dest.subCode)}
+                                style={{padding:'4px 8px',background:'rgba(255,255,255,.06)',border:'1px solid rgba(255,255,255,.12)',borderRadius:'6px',color:T.dim,fontFamily:'inherit',fontSize:'11px',cursor:'pointer'}}>
+                                {p.name.slice(0,5)} → {dest.name}
+                              </button>);
+                            });
+                          });
+                          return btns;
+                        })()}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
