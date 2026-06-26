@@ -1,7 +1,9 @@
 {
   "name": "Virtual Poker Chips",
   "short_name": "Poker Chips",
-  "start_url": "https://j00hnpoker.github.io/Poker-VC",
+  "id": "/Poker-VC/",
+  "start_url": "https://j00hnpoker.github.io/Poker-VC/",
+  "scope": "https://j00hnpoker.github.io/Poker-VC/",
   "display": "standalone",
   "background_color": "#0b0f1a",
   "theme_color": "#D4AF37",
